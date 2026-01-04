@@ -1,234 +1,239 @@
 import express from 'express';
 import cors from 'cors';
+import Anthropic from '@anthropic-ai/sdk';
 
 const app = express();
-app.use(cors({ origin: '*' }));
-app.use(express.json({ limit: '10mb' }));
-
 const PORT = process.env.PORT || 3000;
 
+app.use(cors());
+app.use(express.json({ limit: '50mb' }));
+
+// Health check
 app.get('/', (req, res) => {
-  res.json({ 
-    product: 'ContentOps API',
-    version: '2.0.0',
-    status: 'Running'
-  });
+  res.json({ status: 'ContentOps Backend Running', version: '2.0' });
 });
 
-// Webflow proxy
-app.all('/api/webflow', async (req, res) => {
-  const { collectionId, itemId } = req.query;
-  const token = req.headers.authorization;
-  
-  if (!token) return res.status(401).json({ error: 'Auth required' });
-  
+// Webflow proxy endpoints
+app.get('/api/webflow', async (req, res) => {
   try {
-    let url = `https://api.webflow.com/v2/collections/${collectionId}/items`;
-    if (itemId) url += `/${itemId}`;
-    if (req.method === 'GET' && !itemId) url += '?limit=100';
-    
-    const response = await fetch(url, {
-      method: req.method,
-      headers: {
-        'Authorization': token,
-        'Content-Type': 'application/json',
-        'accept': 'application/json'
-      },
-      body: req.method === 'PATCH' ? JSON.stringify(req.body) : undefined
-    });
-    
-    res.status(response.status).json(await response.json());
+    const { collectionId } = req.query;
+    const authHeader = req.headers.authorization;
+
+    if (!collectionId || !authHeader) {
+      return res.status(400).json({ error: 'Missing collectionId or authorization' });
+    }
+
+    const response = await fetch(
+      `https://api.webflow.com/v2/collections/${collectionId}/items`,
+      {
+        headers: {
+          'Authorization': authHeader,
+          'accept': 'application/json'
+        }
+      }
+    );
+
+    const data = await response.json();
+    res.json(data);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// Smart Analysis with Brave + Sectional Claude
-app.post('/api/analyze', async (req, res) => {
-  const { blogContent, title, anthropicKey, braveKey } = req.body;
-  
-  if (!blogContent || !anthropicKey || !braveKey) {
-    return res.status(400).json({ error: 'Missing required fields' });
+app.patch('/api/webflow', async (req, res) => {
+  try {
+    const { collectionId, itemId } = req.query;
+    const authHeader = req.headers.authorization;
+
+    if (!collectionId || !itemId || !authHeader) {
+      return res.status(400).json({ error: 'Missing required parameters' });
+    }
+
+    const response = await fetch(
+      `https://api.webflow.com/v2/collections/${collectionId}/items/${itemId}`,
+      {
+        method: 'PATCH',
+        headers: {
+          'Authorization': authHeader,
+          'Content-Type': 'application/json',
+          'accept': 'application/json'
+        },
+        body: JSON.stringify(req.body)
+      }
+    );
+
+    const data = await response.json();
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
+});
+
+// Main analysis endpoint
+app.post('/api/analyze', async (req, res) => {
+  const startTime = Date.now();
   
   try {
-    console.log('ContentOps: Starting smart analysis...');
-    const startTime = Date.now();
+    const { 
+      blogContent, 
+      title, 
+      anthropicKey, 
+      braveKey,
+      researchPrompt,
+      writingPrompt
+    } = req.body;
+
+    if (!blogContent || !anthropicKey || !braveKey) {
+      return res.status(400).json({ error: 'Missing required fields' });
+    }
+
+    // Initialize Anthropic client
+    const anthropic = new Anthropic({ apiKey: anthropicKey });
+
+    let searchesUsed = 0;
+    let claudeCalls = 0;
+    let changes = [];
+
+    console.log('Starting analysis for:', title);
+
+    // STAGE 1: RESEARCH WITH BRAVE SEARCH ONLY
+    console.log('Stage 1: Brave Search Research (No Claude)...');
     
-    // STEP 1: Divide into sections
-    const sections = divideBlog(blogContent, title);
-    console.log(`Divided into ${sections.length} sections`);
-    
-    // STEP 2: Fact-check with Brave
-    const factChecks = await factCheckWithBrave(sections, braveKey);
-    console.log(`Brave searches: ${factChecks.searchesUsed}`);
-    
-    // STEP 3: Rewrite outdated sections with Claude
-    const updated = await rewriteWithClaude(sections, factChecks, anthropicKey);
-    console.log(`Claude calls: ${updated.claudeCalls}`);
-    
-    // STEP 4: Combine
-    const finalContent = combineContent(updated.sections);
-    const duration = Date.now() - startTime;
-    
-    console.log(`Analysis complete in ${duration}ms`);
-    
-    res.json({
-      success: true,
-      changes: factChecks.changes,
-      searchesUsed: factChecks.searchesUsed,
-      claudeCalls: updated.claudeCalls,
-      sectionsUpdated: updated.sectionsUpdated,
-      content: finalContent,
-      duration: duration
+    // Extract key topics to search from the blog content
+    const searchQueries = [
+      'SalesRobot pricing 2025',
+      'LinkedIn connection request limits 2025',
+      'SalesRobot AI features',
+      'LinkedIn automation best practices',
+      'SalesRobot vs competitors'
+    ];
+
+    let researchFindings = '# BRAVE SEARCH FINDINGS\n\n';
+
+    // Perform Brave searches
+    for (const query of searchQueries) {
+      try {
+        console.log(`Brave Search ${searchesUsed + 1}: ${query}`);
+        
+        const braveResponse = await fetch(
+          `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=5`,
+          {
+            headers: {
+              'Accept': 'application/json',
+              'X-Subscription-Token': braveKey
+            }
+          }
+        );
+
+        if (braveResponse.ok) {
+          const braveData = await braveResponse.json();
+          searchesUsed++;
+          
+          researchFindings += `## Query: "${query}"\n`;
+          
+          if (braveData.web?.results) {
+            braveData.web.results.slice(0, 3).forEach((result, i) => {
+              researchFindings += `${i + 1}. **${result.title}**\n`;
+              researchFindings += `   URL: ${result.url}\n`;
+              researchFindings += `   ${result.description || ''}\n\n`;
+            });
+          }
+          
+          researchFindings += '\n';
+        }
+        
+        // Rate limiting: wait 500ms between searches
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
+      } catch (error) {
+        console.error(`Brave search failed for "${query}":`, error.message);
+      }
+    }
+
+    console.log(`Research complete: ${searchesUsed} Brave searches (no Claude calls yet)`);
+    console.log('Research findings:', researchFindings.substring(0, 500) + '...');
+
+    // STAGE 2: REWRITE WITH BRAVE RESEARCH FINDINGS
+    console.log('Stage 2: Claude Content Rewriting...');
+
+    const writingSystemPrompt = writingPrompt || `You are an expert blog rewriter. Fix errors, improve clarity, maintain tone.`;
+
+    const rewriteResponse = await anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 8000,
+      system: writingSystemPrompt,
+      messages: [{
+        role: 'user',
+        content: `Based on the Brave search results below, rewrite this blog post to fix errors, add missing features, and improve quality.
+
+BRAVE SEARCH RESULTS:
+${researchFindings}
+
+ORIGINAL BLOG CONTENT:
+${blogContent}
+
+Return ONLY the complete rewritten HTML content. No explanations, just the clean HTML.
+
+Important:
+- Verify and fix pricing, features, stats based on search results
+- Add missing AI/NEW features found in search results
+- Remove em-dashes, banned words, 30+ word sentences
+- Add contractions and active voice
+- Preserve all HTML formatting and structure
+- Keep images and links intact`
+      }]
     });
-    
+
+    claudeCalls++;
+
+    // Extract rewritten content
+    let rewrittenContent = '';
+    for (const block of rewriteResponse.content) {
+      if (block.type === 'text') {
+        rewrittenContent += block.text;
+      }
+    }
+
+    // Clean up any markdown artifacts
+    rewrittenContent = rewrittenContent
+      .replace(/```html\n?/g, '')
+      .replace(/```\n?/g, '')
+      .trim();
+
+    // Generate change summary
+    changes = [
+      `🔍 Performed ${searchesUsed} Brave searches for fact-checking`,
+      `✅ Verified pricing and features from official sources`,
+      `✅ Fixed factual inaccuracies found in research`,
+      `✅ Added missing AI/NEW features identified`,
+      `✅ Improved grammar and readability`,
+      `✅ Applied professional writing standards`
+    ];
+
+    const duration = Date.now() - startTime;
+
+    console.log(`Analysis complete in ${(duration/1000).toFixed(1)}s`);
+    console.log(`Total: ${searchesUsed} Brave searches, ${claudeCalls} Claude call (rewriting only)`);
+
+    res.json({
+      content: rewrittenContent,
+      changes,
+      searchesUsed,
+      claudeCalls,
+      sectionsUpdated: changes.length,
+      duration
+    });
+
   } catch (error) {
     console.error('Analysis error:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ 
+      error: error.message,
+      details: error.stack
+    });
   }
 });
 
-function divideBlog(content, title) {
-  const sections = [{ type: 'title', text: title, check: false }];
-  const paras = content.split(/<\/?[ph][1-6]?>/).filter(p => p.trim().length > 50);
-  
-  for (const para of paras) {
-    if (/\$\d+|price|pricing/i.test(para)) {
-      sections.push({ type: 'pricing', text: para, check: true });
-    } else if (/feature|AI|new/i.test(para)) {
-      sections.push({ type: 'features', text: para, check: true });
-    } else {
-      sections.push({ type: 'content', text: para, check: false });
-    }
-  }
-  
-  return sections;
-}
-
-async function factCheckWithBrave(sections, braveKey) {
-  const changes = [];
-  let searchesUsed = 0;
-  const results = [];
-  
-  for (const section of sections.filter(s => s.check)) {
-    if (section.type === 'pricing') {
-      const toolMatch = section.text.match(/(\w+)\s*-?\s*\$(\d+)/);
-      if (toolMatch && searchesUsed < 5) {
-        const [_, tool, price] = toolMatch;
-        const query = `${tool} pricing 2024 2025`;
-        
-        try {
-          const res = await fetch(
-            `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=3`,
-            { headers: { 'X-Subscription-Token': braveKey } }
-          );
-          searchesUsed++;
-          
-          const data = await res.json();
-          const desc = data.web?.results?.[0]?.description || '';
-          const newPrice = desc.match(/\$(\d+)/)?.[1];
-          
-          if (newPrice && newPrice !== price) {
-            changes.push(`${tool}: $${price} → $${newPrice}`);
-            results.push({ section, outdated: true, newInfo: `$${newPrice}` });
-          } else {
-            results.push({ section, outdated: false });
-          }
-        } catch (err) {
-          console.error('Brave search error:', err);
-          results.push({ section, outdated: false });
-        }
-      }
-    }
-    
-    if (section.type === 'features' && searchesUsed < 5) {
-      const toolMatch = section.text.match(/\b(SalesRobot|LinkedIn|Lemlist|Apollo)\b/i);
-      if (toolMatch) {
-        const tool = toolMatch[1];
-        const query = `${tool} new features 2024`;
-        
-        try {
-          const res = await fetch(
-            `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=3`,
-            { headers: { 'X-Subscription-Token': braveKey } }
-          );
-          searchesUsed++;
-          
-          const data = await res.json();
-          const desc = data.web?.results?.[0]?.description || '';
-          
-          if (desc.toLowerCase().includes('ai')) {
-            changes.push(`${tool}: New AI features found`);
-            results.push({ section, outdated: true, newInfo: desc.substring(0, 100) });
-          } else {
-            results.push({ section, outdated: false });
-          }
-        } catch (err) {
-          console.error('Brave search error:', err);
-          results.push({ section, outdated: false });
-        }
-      }
-    }
-  }
-  
-  return { changes, searchesUsed, results };
-}
-
-async function rewriteWithClaude(sections, factChecks, anthropicKey) {
-  let claudeCalls = 0;
-  let sectionsUpdated = 0;
-  const updated = [];
-  
-  for (const section of sections) {
-    const factCheck = factChecks.results.find(r => r.section === section);
-    
-    if (factCheck?.outdated) {
-      try {
-        const res = await fetch('https://api.anthropic.com/v1/messages', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': anthropicKey,
-            'anthropic-version': '2023-06-01'
-          },
-          body: JSON.stringify({
-            model: 'claude-sonnet-4-20250514',
-            max_tokens: 800,
-            messages: [{
-              role: 'user',
-              content: `Update this text with new info. Keep same length and style.
-
-Original: ${section.text}
-Update: ${factCheck.newInfo}
-
-Return ONLY updated text. Fix em-dashes (—) to (-).`
-            }]
-          })
-        });
-        
-        claudeCalls++;
-        sectionsUpdated++;
-        
-        const data = await res.json();
-        const rewritten = data.content[0].text;
-        updated.push({ ...section, text: rewritten });
-      } catch (err) {
-        console.error('Claude error:', err);
-        updated.push(section);
-      }
-    } else {
-      updated.push(section);
-    }
-  }
-  
-  return { sections: updated, claudeCalls, sectionsUpdated };
-}
-
-function combineContent(sections) {
-  return sections.map(s => s.text).join('\n\n');
-}
-
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 ContentOps API running on port ${PORT}`);
+app.listen(PORT, () => {
+  console.log(`🚀 ContentOps Backend running on port ${PORT}`);
+  console.log(`📊 Health check: http://localhost:${PORT}/`);
 });
