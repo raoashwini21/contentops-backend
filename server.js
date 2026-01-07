@@ -160,7 +160,7 @@ app.post('/api/analyze', async (req, res) => {
 
     const rewriteResponse = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 8000,
+      max_tokens: 16000, // Increased from 8000 to handle longer content
       system: writingSystemPrompt,
       messages: [{
         role: 'user',
@@ -180,7 +180,8 @@ Important:
 - Remove em-dashes, banned words, 30+ word sentences
 - Add contractions and active voice
 - Preserve all HTML formatting and structure
-- Keep images and links intact`
+- Keep images and links intact
+- RETURN THE ENTIRE BLOG - DO NOT TRUNCATE`
       }]
     });
 
