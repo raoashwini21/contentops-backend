@@ -160,7 +160,7 @@ app.post('/api/analyze', async (req, res) => {
 
     const rewriteResponse = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 16000, // Increased from 8000 to handle longer content
+      max_tokens: 32000, // Increased from 8000 to handle longer content
       system: writingSystemPrompt,
       messages: [{
         role: 'user',
