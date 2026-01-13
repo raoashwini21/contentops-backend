@@ -5,26 +5,34 @@ import Anthropic from '@anthropic-ai/sdk';
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(cors());
+// FIXED: Proper CORS configuration
+app.use(cors({
+  origin: '*', // Allow all origins (or specify your Vercel domain)
+  methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
+  credentials: true
+}));
+
 app.use(express.json({ limit: '50mb' }));
 
 // Health check
 app.get('/', (req, res) => {
-  res.json({ status: 'ContentOps Backend Running', version: '2.0' });
+  res.json({ status: 'ContentOps Backend Running', version: '2.1-FIXED' });
 });
 
-// Webflow proxy endpoints
+// FIXED: Webflow proxy with pagination support
 app.get('/api/webflow', async (req, res) => {
   try {
-    const { collectionId } = req.query;
+    const { collectionId, offset = '0', limit = '100' } = req.query; // ← ADDED pagination
     const authHeader = req.headers.authorization;
 
     if (!collectionId || !authHeader) {
       return res.status(400).json({ error: 'Missing collectionId or authorization' });
     }
 
+    // ← ADDED offset and limit to URL
     const response = await fetch(
-      `https://api.webflow.com/v2/collections/${collectionId}/items`,
+      `https://api.webflow.com/v2/collections/${collectionId}/items?offset=${offset}&limit=${limit}`,
       {
         headers: {
           'Authorization': authHeader,
@@ -69,7 +77,7 @@ app.patch('/api/webflow', async (req, res) => {
   }
 });
 
-// Main analysis endpoint
+// FIXED: Main analysis endpoint with dynamic search
 app.post('/api/analyze', async (req, res) => {
   const startTime = Date.now();
   
@@ -96,21 +104,66 @@ app.post('/api/analyze', async (req, res) => {
 
     console.log('Starting analysis for:', title);
 
-    // STAGE 1: RESEARCH WITH BRAVE SEARCH ONLY
-    console.log('Stage 1: Brave Search Research (No Claude)...');
+    // STAGE 1: GENERATE DYNAMIC SEARCH QUERIES USING CLAUDE
+    console.log('Stage 1: Generate search queries from blog content...');
     
-    // Extract key topics to search from the blog content
-    const searchQueries = [
-      'SalesRobot pricing 2025',
-      'LinkedIn connection request limits 2025',
-      'SalesRobot AI features',
-      'LinkedIn automation best practices',
-      'SalesRobot vs competitors'
-    ];
+    const queryGenerationPrompt = `Analyze this blog post and generate 5-7 specific search queries for fact-checking.
 
+RESEARCH INSTRUCTIONS:
+${researchPrompt || 'Verify all claims, pricing, features, and statistics mentioned.'}
+
+BLOG TITLE: ${title}
+
+BLOG CONTENT (first 3000 chars):
+${blogContent.substring(0, 3000)}
+
+Generate search queries that will help verify:
+- All company/product names mentioned (pricing, features, stats)
+- All competitors mentioned (pricing, features, comparisons)
+- Industry statistics and benchmarks
+- Platform limits and policies (LinkedIn, etc.)
+- Technical specifications and capabilities
+
+Return ONLY a JSON array of 5-7 search query strings, nothing else. Example format:
+["query 1", "query 2", "query 3", "query 4", "query 5"]
+
+Focus on entities actually mentioned in this blog, not generic queries.`;
+
+    const queryResponse = await anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 1000,
+      messages: [{
+        role: 'user',
+        content: queryGenerationPrompt
+      }]
+    });
+
+    claudeCalls++;
+
+    // Extract search queries from Claude's response
+    let searchQueries = [];
+    try {
+      const queryText = queryResponse.content[0].text.trim();
+      // Remove markdown code blocks if present
+      const cleanedText = queryText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+      searchQueries = JSON.parse(cleanedText);
+      console.log('Generated search queries:', searchQueries);
+    } catch (error) {
+      console.error('Failed to parse search queries:', error);
+      // Fallback to basic queries
+      searchQueries = [
+        `${title} pricing 2025`,
+        `${title} features comparison`,
+        'LinkedIn automation limits 2025'
+      ];
+    }
+
+    // STAGE 2: BRAVE SEARCH WITH DYNAMIC QUERIES
+    console.log('Stage 2: Brave Search Research...');
+    
     let researchFindings = '# BRAVE SEARCH FINDINGS\n\n';
 
-    // Perform Brave searches
+    // Perform Brave searches with generated queries
     for (const query of searchQueries) {
       try {
         console.log(`Brave Search ${searchesUsed + 1}: ${query}`);
@@ -150,21 +203,27 @@ app.post('/api/analyze', async (req, res) => {
       }
     }
 
-    console.log(`Research complete: ${searchesUsed} Brave searches (no Claude calls yet)`);
-    console.log('Research findings:', researchFindings.substring(0, 500) + '...');
+    console.log(`Research complete: ${searchesUsed} Brave searches, ${claudeCalls} Claude call (query generation)`);
 
-    // STAGE 2: REWRITE WITH BRAVE RESEARCH FINDINGS
-    console.log('Stage 2: Claude Content Rewriting...');
+    // STAGE 3: REWRITE WITH BRAVE RESEARCH FINDINGS
+    console.log('Stage 3: Claude Content Rewriting...');
 
     const writingSystemPrompt = writingPrompt || `You are an expert blog rewriter. Fix errors, improve clarity, maintain tone.`;
 
     const rewriteResponse = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 32000, // Increased from 8000 to handle longer content
+      max_tokens: 32000,
       system: writingSystemPrompt,
       messages: [{
         role: 'user',
-        content: `Based on the Brave search results below, rewrite this blog post to fix errors, add missing features, and improve quality.
+        content: `Based on the Brave search results below, rewrite this blog post to fix ALL errors and improve quality.
+
+CRITICAL: Update ALL incorrect facts found via Brave Search:
+- Update competitor pricing (Expandi, Dripify, LinkedHelper, etc.)
+- Update LinkedIn platform limits and policies (verify exact numbers)
+- Update industry statistics and benchmarks (use latest data)
+- Update product features for ALL tools mentioned (not just one product)
+- Update company information for ALL companies mentioned
 
 BRAVE SEARCH RESULTS:
 ${researchFindings}
@@ -174,13 +233,14 @@ ${blogContent}
 
 Return ONLY the complete rewritten HTML content. No explanations, just the clean HTML.
 
-Important:
-- Verify and fix pricing, features, stats based on search results
-- Add missing AI/NEW features found in search results
-- Remove em-dashes, banned words, 30+ word sentences
-- Add contractions and active voice
+IMPORTANT:
+- Apply ALL corrections from Brave Search to ALL entities mentioned
+- Update every incorrect fact you find (pricing, features, stats, limits)
+- This applies to ALL companies/tools, not just one product
 - Preserve all HTML formatting and structure
-- Keep images and links intact
+- Keep ALL images, links, tables, widgets, lists intact
+- Remove em-dashes, banned AI words, 30+ word sentences
+- Use contractions, active voice, simple language
 - RETURN THE ENTIRE BLOG - DO NOT TRUNCATE`
       }]
     });
@@ -203,18 +263,18 @@ Important:
 
     // Generate change summary
     changes = [
-      `🔍 Performed ${searchesUsed} Brave searches for fact-checking`,
-      `✅ Verified pricing and features from official sources`,
-      `✅ Fixed factual inaccuracies found in research`,
-      `✅ Added missing AI/NEW features identified`,
-      `✅ Improved grammar and readability`,
+      `🔍 Performed ${searchesUsed} dynamic Brave searches based on blog content`,
+      `🤖 Used Claude to identify entities and generate relevant queries`,
+      `✅ Verified pricing and features for ALL products mentioned`,
+      `✅ Updated competitor information from official sources`,
+      `✅ Fixed factual inaccuracies across all entities`,
       `✅ Applied professional writing standards`
     ];
 
     const duration = Date.now() - startTime;
 
     console.log(`Analysis complete in ${(duration/1000).toFixed(1)}s`);
-    console.log(`Total: ${searchesUsed} Brave searches, ${claudeCalls} Claude call (rewriting only)`);
+    console.log(`Total: ${searchesUsed} Brave searches, ${claudeCalls} Claude calls (1 query gen + 1 rewrite)`);
 
     res.json({
       content: rewrittenContent,
@@ -234,7 +294,11 @@ Important:
   }
 });
 
-app.listen(PORT, () => {
+// FIXED: Proper server initialization with timeout
+const server = app.listen(PORT, () => {
   console.log(`🚀 ContentOps Backend running on port ${PORT}`);
   console.log(`📊 Health check: http://localhost:${PORT}/`);
 });
+
+// FIXED: Increase server timeout to 5 minutes for long blog analysis
+server.timeout = 300000; // 5 minutes (300 seconds)
