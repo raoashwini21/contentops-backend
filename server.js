@@ -16,15 +16,16 @@ app.get('/', (req, res) => {
 // Webflow proxy endpoints
 app.get('/api/webflow', async (req, res) => {
   try {
-    const { collectionId } = req.query;
+    const { collectionId, offset = '0', limit = '100' } = req.query; // ← ADDED offset and limit
     const authHeader = req.headers.authorization;
 
     if (!collectionId || !authHeader) {
       return res.status(400).json({ error: 'Missing collectionId or authorization' });
     }
 
+    // ← ADDED offset and limit to Webflow API URL
     const response = await fetch(
-      `https://api.webflow.com/v2/collections/${collectionId}/items`,
+      `https://api.webflow.com/v2/collections/${collectionId}/items?offset=${offset}&limit=${limit}`,
       {
         headers: {
           'Authorization': authHeader,
@@ -160,7 +161,7 @@ app.post('/api/analyze', async (req, res) => {
 
     const rewriteResponse = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 32000, // Increased from 8000 to handle longer content
+      max_tokens: 32000,
       system: writingSystemPrompt,
       messages: [{
         role: 'user',
@@ -234,7 +235,10 @@ Important:
   }
 });
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`🚀 ContentOps Backend running on port ${PORT}`);
   console.log(`📊 Health check: http://localhost:${PORT}/`);
 });
+
+// Increase server timeout to 180 seconds for long blog analysis
+server.timeout = 180000;
