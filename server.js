@@ -17,19 +17,44 @@ app.use(express.json({ limit: '50mb' }));
 
 // Health check
 app.get('/', (req, res) => {
-  res.json({ status: 'ContentOps Backend Running', version: '2.2-CHUNKED' });
+  res.json({ status: 'ContentOps Backend Running', version: '3.0-FINAL' });
 });
 
 // Webflow proxy with pagination
 app.get('/api/webflow', async (req, res) => {
   try {
-    const { collectionId, offset = '0', limit = '100' } = req.query;
+    const { collectionId, itemId, offset = '0', limit = '100' } = req.query;
     const authHeader = req.headers.authorization;
 
     if (!collectionId || !authHeader) {
       return res.status(400).json({ error: 'Missing collectionId or authorization' });
     }
 
+    // Single item fetch (for testing connection)
+    if (itemId) {
+      const response = await fetch(
+        `https://api.webflow.com/v2/collections/${collectionId}/items/${itemId}`,
+        {
+          headers: {
+            'Authorization': authHeader,
+            'accept': 'application/json'
+          }
+        }
+      );
+
+      const data = await response.json();
+      
+      if (!response.ok) {
+        return res.status(response.status).json({ 
+          error: data.message || data.err || 'Webflow API error',
+          details: data
+        });
+      }
+      
+      return res.json(data);
+    }
+
+    // List items with pagination
     const response = await fetch(
       `https://api.webflow.com/v2/collections/${collectionId}/items?offset=${offset}&limit=${limit}`,
       {
@@ -41,20 +66,34 @@ app.get('/api/webflow', async (req, res) => {
     );
 
     const data = await response.json();
+    
+    if (!response.ok) {
+      return res.status(response.status).json({ 
+        error: data.message || data.err || 'Webflow API error',
+        details: data
+      });
+    }
+    
     res.json(data);
   } catch (error) {
+    console.error('Webflow proxy error:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
+// Webflow update (PATCH)
 app.patch('/api/webflow', async (req, res) => {
   try {
     const { collectionId, itemId } = req.query;
     const authHeader = req.headers.authorization;
+    const { fieldData } = req.body;
 
     if (!collectionId || !itemId || !authHeader) {
       return res.status(400).json({ error: 'Missing required parameters' });
     }
+
+    console.log('Updating Webflow item:', itemId);
+    console.log('Payload size:', JSON.stringify(fieldData).length, 'characters');
 
     const response = await fetch(
       `https://api.webflow.com/v2/collections/${collectionId}/items/${itemId}`,
@@ -65,59 +104,54 @@ app.patch('/api/webflow', async (req, res) => {
           'Content-Type': 'application/json',
           'accept': 'application/json'
         },
-        body: JSON.stringify(req.body)
+        body: JSON.stringify({ fieldData })
       }
     );
 
     const data = await response.json();
+    console.log('Webflow response status:', response.status);
+    
+    if (!response.ok) {
+      console.error('Webflow error:', data);
+      return res.status(response.status).json({ 
+        error: data.message || data.err || `Webflow API error: ${response.statusText}`,
+        details: data,
+        statusCode: response.status
+      });
+    }
+    
     res.json(data);
   } catch (error) {
+    console.error('Webflow update error:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// Helper: Split HTML into chunks by paragraphs
-function splitBlogIntoChunks(html, maxChunkSize = 10000) {
-  // Split on closing tags for major elements
-  const splitPattern = /(<\/(?:p|div|h[1-6]|section|article|li)>)/gi;
-  const parts = html.split(splitPattern);
+// Helper function to split blog into manageable chunks
+const splitBlogIntoChunks = (content, maxChunkSize = 10000) => {
+  if (content.length <= maxChunkSize) return [content];
   
   const chunks = [];
   let currentChunk = '';
+  const paragraphs = content.split(/<\/p>|<\/h[1-6]>|<\/li>/);
   
-  for (let i = 0; i < parts.length; i += 2) {
-    const content = parts[i] || '';
-    const closingTag = parts[i + 1] || '';
-    const segment = content + closingTag;
+  for (const para of paragraphs) {
+    const fullPara = para + (para.includes('<p') ? '</p>' : para.includes('<h') ? `</h${para.match(/<h([1-6])/)?.[1] || '2'}>` : '</li>');
     
-    if ((currentChunk + segment).length > maxChunkSize && currentChunk.length > 0) {
+    if ((currentChunk + fullPara).length > maxChunkSize && currentChunk) {
       chunks.push(currentChunk);
-      currentChunk = segment;
+      currentChunk = fullPara;
     } else {
-      currentChunk += segment;
+      currentChunk += fullPara;
     }
   }
   
-  if (currentChunk.trim().length > 0) {
-    chunks.push(currentChunk);
-  }
-  
-  // If splitting resulted in too many tiny chunks or failed, split by character count
-  if (chunks.length === 0 || (chunks.length > 5 && html.length > 50000)) {
-    chunks.length = 0;
-    const numChunks = Math.ceil(html.length / maxChunkSize);
-    for (let i = 0; i < numChunks; i++) {
-      chunks.push(html.substring(i * maxChunkSize, (i + 1) * maxChunkSize));
-    }
-  }
-  
-  return chunks.length > 0 ? chunks : [html];
-}
+  if (currentChunk) chunks.push(currentChunk);
+  return chunks;
+};
 
-// Main analysis endpoint with chunked processing
+// Main analysis endpoint
 app.post('/api/analyze', async (req, res) => {
-  const startTime = Date.now();
-  
   try {
     const { 
       blogContent, 
@@ -149,8 +183,11 @@ app.post('/api/analyze', async (req, res) => {
 
     // STAGE 1: Generate search queries (once for entire blog)
     console.log('Stage 1: Generate search queries...');
+    console.log('%c=== QUERY GENERATION ===', 'background: #8b5cf6; color: white; padding: 4px 8px; font-weight: bold;');
+    console.log('Blog title:', title);
+    console.log('Research type:', researchPrompt ? 'Custom' : 'Default');
     
-    const queryGenerationPrompt = `Analyze this blog post and generate 5-7 specific search queries for fact-checking.
+    const queryGenerationPrompt = `Analyze this blog post and generate 6-8 HIGHLY SPECIFIC search queries for fact-checking.
 
 RESEARCH INSTRUCTIONS:
 ${researchPrompt || 'Verify all claims, pricing, features, and statistics mentioned.'}
@@ -160,17 +197,44 @@ BLOG TITLE: ${title}
 BLOG CONTENT (first 3000 chars):
 ${blogContent.substring(0, 3000)}
 
+CRITICAL SEARCH QUERY RULES:
+1. For FEATURES: Search for BOTH current AND new features:
+   - "site:companyname.com features 2025"
+   - "companyname new features 2025"
+   - "companyname ai features 2025" (if AI product)
+   - "companyname recent updates 2025"
+2. For STATISTICS: Use "companyname official statistics 2025" or authoritative sources
+3. For LIMITS/QUOTAS: Use "site:companyname.com limits" or "companyname official documentation limits"
+4. For COMPARISONS: Search official sources of BOTH products being compared
+5. ALWAYS prefer official sources: Use "site:" operator or include "official" keyword
+6. Include year "2025" for LATEST information
+7. DO NOT generate pricing queries (pricing will be manually verified)
+
 Generate search queries that will help verify:
-- All company/product names mentioned (pricing, features, stats)
-- All competitors mentioned (pricing, features, comparisons)
-- Industry statistics and benchmarks
-- Platform limits and policies
-- Technical specifications
+- Features - BOTH current AND new (Search: "features 2025" AND "new features 2025" AND "ai features 2025")
+- NEW integrations and capabilities (Search: "companyname recent updates 2025", "new integrations")
+- Statistics (Use official company reports or authoritative sources)
+- Platform limits/quotas (Use: "site:companyname.com limits" or official docs)
+- Technical specifications (Use: "site:companyname.com documentation" or official specs)
 
-Return ONLY a JSON array of 5-7 search query strings. Example:
-["query 1", "query 2", "query 3", "query 4", "query 5"]
+EXAMPLE GOOD QUERIES (focus on features, NOT pricing):
+✅ "site:mailshake.com features 2025"
+✅ "mailshake new features 2025"
+✅ "mailshake ai features 2025"
+✅ "salesrobot new capabilities 2025"
+✅ "salesrobot recent updates january 2025"
+✅ "site:linkedin.com connection limits official 2025"
+✅ "email deliverability statistics official 2024"
 
-Focus on entities actually mentioned in this blog.`;
+EXAMPLE BAD QUERIES (don't generate these):
+❌ "mailshake pricing" (pricing verified manually)
+❌ "best email tools" (not specific)
+❌ "email automation features" (too generic, misses NEW features)
+
+Return ONLY a JSON array of 6-8 search query strings. Example:
+["site:mailshake.com features 2025", "mailshake new features 2025", "mailshake ai capabilities 2025"]
+
+Focus on entities actually mentioned in this blog. Prioritize official sources. DO NOT include pricing queries.`;
 
     const queryResponse = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
@@ -185,20 +249,49 @@ Focus on entities actually mentioned in this blog.`;
       const queryText = queryResponse.content[0].text.trim()
         .replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
       searchQueries = JSON.parse(queryText);
-      console.log('Generated search queries:', searchQueries);
+      console.log('%c✓ Generated search queries:', 'color: #10b981; font-weight: bold;');
+      searchQueries.forEach((q, i) => {
+        const isOfficialSource = q.includes('site:') || q.includes('official');
+        const isPricing = q.toLowerCase().includes('pricing') || q.toLowerCase().includes('price') || q.toLowerCase().includes('cost');
+        if (isPricing) {
+          console.log(`  ${i + 1}. ${q} ⚠️ (PRICING - will be skipped)`);
+        } else {
+          console.log(`  ${i + 1}. ${q} ${isOfficialSource ? '🔒 (official source)' : '⚠️ (generic)'}`);
+        }
+      });
+      
+      // Filter out any pricing queries
+      searchQueries = searchQueries.filter(q => {
+        const isPricing = q.toLowerCase().includes('pricing') || q.toLowerCase().includes('price') || q.toLowerCase().includes('cost');
+        if (isPricing) {
+          console.log(`%c⏭️ Skipping pricing query: ${q}`, 'color: #f59e0b;');
+        }
+        return !isPricing;
+      });
     } catch (error) {
-      console.error('Failed to parse queries:', error);
-      searchQueries = [`${title} pricing 2025`, `${title} features`, 'industry statistics 2025'];
+      console.error('%cFailed to parse queries:', 'color: #ef4444;', error);
+      searchQueries = [`${title} features 2025`, `${title} new features`, 'industry statistics 2025'];
+      console.log('Using fallback queries:', searchQueries);
     }
 
     // STAGE 2: Brave Search (once for entire blog)
     console.log('Stage 2: Brave Search...');
+    console.log('%c=== BRAVE SEARCH STARTING ===', 'background: #0ea5e9; color: white; padding: 4px 8px; font-weight: bold;');
     
-    let researchFindings = '# BRAVE SEARCH FINDINGS\n\n';
+    let researchFindings = `# BRAVE SEARCH FINDINGS
 
-    for (const query of searchQueries.slice(0, 6)) { // Limit to 6 searches
+⚠️ IMPORTANT VERIFICATION NOTE:
+- Multiple searches help cross-verify features and facts
+- Look for dates/timestamps in search results
+- Prefer results from 2025 > 2024 > 2023
+- Focus on NEW features, integrations, and capabilities not in original blog
+- If results conflict or unclear: KEEP ORIGINAL TEXT
+
+`;
+
+    for (const query of searchQueries.slice(0, 8)) {
       try {
-        console.log(`Brave Search ${totalSearchesUsed + 1}: ${query}`);
+        console.log(`%cBrave Search ${totalSearchesUsed + 1}: ${query}`, 'color: #0ea5e9; font-weight: bold;');
         
         const braveResponse = await fetch(
           `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=5`,
@@ -216,24 +309,36 @@ Focus on entities actually mentioned in this blog.`;
           
           researchFindings += `## Query: "${query}"\n`;
           
+          console.log('%cSearch Results:', 'color: #10b981; font-weight: bold;');
+          
           if (braveData.web?.results) {
             braveData.web.results.slice(0, 3).forEach((result, i) => {
               researchFindings += `${i + 1}. **${result.title}**\n`;
               researchFindings += `   URL: ${result.url}\n`;
               researchFindings += `   ${result.description || ''}\n\n`;
+              
+              // LOG TO CONSOLE
+              console.log(`  ${i + 1}. ${result.title}`);
+              console.log(`     ${result.url}`);
+              console.log(`     ${result.description?.substring(0, 150) || '(no description)'}...`);
             });
+          } else {
+            console.log('%c  No results found', 'color: #f59e0b;');
           }
           researchFindings += '\n';
+        } else {
+          console.error('%cBrave API Error:', 'color: #ef4444; font-weight: bold;', braveResponse.status);
         }
         
         await new Promise(resolve => setTimeout(resolve, 400)); // Rate limit
         
       } catch (error) {
-        console.error(`Brave search failed for "${query}":`, error.message);
+        console.error(`%cBrave search failed for "${query}":`, 'color: #ef4444;', error.message);
       }
     }
 
-    console.log(`Research complete: ${totalSearchesUsed} searches, ${totalClaudeCalls} Claude calls`);
+    console.log('%c=== BRAVE SEARCH COMPLETE ===', 'background: #10b981; color: white; padding: 4px 8px; font-weight: bold;');
+    console.log(`Total searches: ${totalSearchesUsed}, Total Claude calls: ${totalClaudeCalls}`);
 
     // STAGE 3: Process each chunk with Claude
     console.log('Stage 3: Processing chunks...');
@@ -256,15 +361,52 @@ ${researchFindings}
 SECTION ${chunkNum} CONTENT:
 ${chunk}
 
-CRITICAL INSTRUCTIONS:
-- Update ALL incorrect facts based on Brave Search
-- Fix pricing, features, stats for ALL entities mentioned
-- Preserve ALL HTML tags, structure, images, links
+⚠️ PRICING POLICY - NEVER AUTO-UPDATE PRICING:
+- DO NOT update pricing automatically (pricing is verified manually by team)
+- Keep ALL pricing exactly as stated in original blog
+- If you see pricing in search results: IGNORE it and keep original
+- Pricing updates require manual human verification
+
+✅ WHAT TO UPDATE (from official sources only):
+- Features and capabilities (especially NEW features not mentioned in blog)
+- NEW AI features, integrations, automation capabilities
+- Platform limits and quotas (only from official docs)
+- Statistics and benchmarks (from authoritative sources)
+- Technical specifications (from official technical docs)
+
+🔍 MISSING FEATURES DETECTION - VERY IMPORTANT:
+- Actively look for NEW features in search results that blog doesn't mention
+- Especially check for:
+  * AI-powered capabilities (AI writing, AI personalization, AI analysis)
+  * New integrations (Salesforce, HubSpot, Zapier, LinkedIn, etc.)
+  * Automation features (workflow automation, smart sequencing)
+  * Analytics features (advanced reporting, tracking)
+  * Recent product updates and launches
+- If official source mentions feature NOT in blog → ADD IT
+- Format naturally: "Additionally, [Product] now offers [feature description]"
+- Example: "SalesRobot also includes AI-powered message optimization and automated LinkedIn post scheduling"
+
+SOURCE REQUIREMENTS:
+- ONLY trust OFFICIAL sources:
+  * site:companyname.com pages
+  * Official documentation (.com/docs, .com/help)
+  * Official blogs (.com/blog from 2024-2025)
+- IGNORE: Review sites, comparison sites, forums, outdated articles
+- If uncertain: KEEP ORIGINAL TEXT
+
+CRITICAL INSTRUCTIONS - FORMATTING:
+- Preserve ALL HTML tags, structure, images, links EXACTLY
+- Preserve ALL <a> tags with href, target, and attributes EXACTLY
+- Preserve ALL heading tags (H1, H2, H3, H4, H5, H6) EXACTLY - do NOT change heading levels
+- Preserve ALL bold/italic formatting EXACTLY
+- Preserve ALL paragraph breaks and list structures EXACTLY
 - Remove em-dashes, banned words, long sentences
 - Use contractions, active voice
 - Return ONLY the rewritten HTML for this section
 - DO NOT add section headers or numbers
-- Keep the exact same HTML structure`
+- Keep the exact same HTML structure and heading hierarchy
+
+GOLDEN RULE: Pricing stays unchanged. Focus on adding NEW features and updating capabilities.`
         : `Based on the Brave search results, rewrite this complete blog post.
 
 BRAVE SEARCH RESULTS:
@@ -273,23 +415,62 @@ ${researchFindings}
 BLOG CONTENT:
 ${chunk}
 
-CRITICAL INSTRUCTIONS:
-- Update ALL incorrect facts based on Brave Search
-- Fix pricing, features, stats for ALL entities
-- Preserve ALL HTML tags, structure, images, links, widgets
+⚠️ PRICING POLICY - NEVER AUTO-UPDATE PRICING:
+- DO NOT update pricing automatically (pricing is verified manually by team)
+- Keep ALL pricing exactly as stated in original blog
+- If you see pricing in search results: IGNORE it and keep original
+- Pricing updates require manual human verification
+
+✅ WHAT TO UPDATE (from official sources only):
+- Features and capabilities (especially NEW features not mentioned in blog)
+- NEW AI features, integrations, automation capabilities
+- Platform limits and quotas (only from official docs)
+- Statistics and benchmarks (from authoritative sources)
+- Technical specifications (from official technical docs)
+
+🔍 MISSING FEATURES DETECTION - VERY IMPORTANT:
+- Actively look for NEW features in search results that blog doesn't mention
+- Especially check for:
+  * AI-powered capabilities (AI writing, AI personalization, AI analysis)
+  * New integrations (Salesforce, HubSpot, Zapier, LinkedIn, etc.)
+  * Automation features (workflow automation, smart sequencing)
+  * Analytics features (advanced reporting, tracking)
+  * Recent product updates and launches
+- If official source mentions feature NOT in blog → ADD IT
+- Format naturally: "Additionally, [Product] now offers [feature description]"
+- Example: "SalesRobot also includes AI-powered message optimization and automated LinkedIn post scheduling"
+
+SOURCE REQUIREMENTS:
+- ONLY trust OFFICIAL sources:
+  * site:companyname.com pages
+  * Official documentation (.com/docs, .com/help)
+  * Official blogs (.com/blog from 2024-2025)
+- IGNORE: Review sites, comparison sites, forums, outdated articles
+- If uncertain: KEEP ORIGINAL TEXT
+
+CRITICAL INSTRUCTIONS - FORMATTING:
+- Preserve ALL HTML tags, structure, images, links, widgets EXACTLY
+- Preserve ALL <a> tags with href, target, and attributes EXACTLY
+- Preserve ALL heading tags (H1, H2, H3, H4, H5, H6) EXACTLY - do NOT change heading levels
+- Preserve ALL bold/italic formatting EXACTLY  
+- Preserve ALL paragraph breaks and list structures EXACTLY
 - Remove em-dashes, banned words, long sentences
 - Use contractions, active voice
 - Return ONLY the complete rewritten HTML
-- NO explanations, just clean HTML`;
+- NO explanations, just clean HTML with EXACT heading structure preserved
+
+GOLDEN RULE: Pricing stays unchanged. Focus on adding NEW features and updating capabilities.`;
 
       const chunkResponse = await anthropic.messages.create({
         model: 'claude-sonnet-4-20250514',
-        max_tokens: 16000, // Reduced for faster processing
+        max_tokens: 16000,
         system: writingSystemPrompt,
         messages: [{ role: 'user', content: chunkPrompt }]
       });
 
       totalClaudeCalls++;
+      
+      console.log(`%c✓ Chunk ${chunkNum} processed`, 'color: #10b981;', `(${chunkResponse.content[0].text.length} chars output)`);
 
       let rewrittenChunk = '';
       for (const block of chunkResponse.content) {
@@ -297,61 +478,31 @@ CRITICAL INSTRUCTIONS:
           rewrittenChunk += block.text;
         }
       }
-
-      // Clean markdown artifacts
-      rewrittenChunk = rewrittenChunk
-        .replace(/```html\n?/g, '')
-        .replace(/```\n?/g, '')
-        .trim();
-
-      processedChunks.push(rewrittenChunk);
       
-      console.log(`Chunk ${chunkNum} complete (${rewrittenChunk.length} chars)`);
+      processedChunks.push(rewrittenChunk);
     }
 
-    // Combine all chunks
-    const finalContent = processedChunks.join('\n\n');
-
-    // Generate changes summary
-    const changes = [
-      `🔍 Performed ${totalSearchesUsed} Brave searches for fact-checking`,
-      `📝 Processed blog in ${chunks.length} section(s) for faster completion`,
-      `🤖 Used ${totalClaudeCalls} Claude calls (1 query gen + ${chunks.length} rewrites)`,
-      `✅ Updated pricing, features, and stats for all entities`,
-      `✅ Fixed factual inaccuracies from research`,
-      `✅ Applied professional writing standards`
-    ];
-
-    const duration = Date.now() - startTime;
-
-    console.log(`Analysis complete in ${(duration/1000).toFixed(1)}s`);
-    console.log(`Total: ${totalSearchesUsed} searches, ${totalClaudeCalls} Claude calls, ${chunks.length} chunks`);
+    // STAGE 4: Combine chunks if needed
+    const finalContent = processedChunks.join('\n');
+    
+    console.log('Analysis complete!');
+    console.log(`Total searches: ${totalSearchesUsed}, Total Claude calls: ${totalClaudeCalls}`);
 
     res.json({
       content: finalContent,
-      changes,
+      changes: allChanges,
       searchesUsed: totalSearchesUsed,
       claudeCalls: totalClaudeCalls,
-      sectionsUpdated: chunks.length,
-      duration
+      sectionsUpdated: processedChunks.length,
+      duration: 0
     });
 
   } catch (error) {
     console.error('Analysis error:', error);
-    const duration = Date.now() - startTime;
-    res.status(500).json({ 
-      error: error.message,
-      duration,
-      details: error.stack
-    });
+    res.status(500).json({ error: error.message });
   }
 });
 
-const server = app.listen(PORT, () => {
-  console.log(`🚀 ContentOps Backend running on port ${PORT}`);
-  console.log(`📊 Health check: http://localhost:${PORT}/`);
-  console.log(`⚡ Chunked processing enabled for long blogs`);
+app.listen(PORT, () => {
+  console.log(`ContentOps Backend running on port ${PORT}`);
 });
-
-// 4-minute timeout (under Railway's 5-minute limit)
-server.timeout = 240000;
