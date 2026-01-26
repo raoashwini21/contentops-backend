@@ -1,5 +1,5 @@
 {
-  "name": "contentops-backend",
+  "name": "test-backend",
   "version": "2.0.0",
   "type": "module",
   "description": "ContentOps Backend - Brave Search + Claude AI",
@@ -11,7 +11,8 @@
   "dependencies": {
     "express": "^4.18.2",
     "cors": "^2.8.5",
-    "@anthropic-ai/sdk": "^0.32.1"
+    "@anthropic-ai/sdk": "^0.32.1",
+    "dotenv": "^16.4.5"
   },
   "engines": {
     "node": ">=18.0.0"
