@@ -4,16 +4,13 @@ import cors from 'cors';
 import Anthropic from '@anthropic-ai/sdk';
 
 // ============================================
-// GOOGLE CUSTOM SEARCH API (Backend Environment Variables)
+// GOOGLE CUSTOM SEARCH API
 // ============================================
 const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
 const GOOGLE_SEARCH_ENGINE_ID = process.env.GOOGLE_SEARCH_ENGINE_ID || '90a56bfbc96304c89';
 
-// Verify keys loaded
 if (!GOOGLE_API_KEY) {
   console.error('⚠️ WARNING: GOOGLE_API_KEY not found in environment variables!');
-  console.error('   Pricing verification will be skipped.');
-  console.error('   Set GOOGLE_API_KEY in Railway dashboard > Variables tab');
 }
 
 const app = express();
@@ -34,24 +31,31 @@ const writingSystemPrompt = `You are an expert blog editor. You:
 9. Return ONLY HTML, no markdown`;
 
 // ============================================
-// WEBFLOW API PROXY
+// BACKEND BLOG CACHE (Solves Concurrent User Issues)
 // ============================================
-app.get('/api/webflow', async (req, res) => {
-  try {
-    const { collectionId, itemId, limit = 100, offset = 0 } = req.query;
-    const webflowToken = req.headers.authorization?.replace('Bearer ', '');
+let blogCache = {
+  data: null,
+  timestamp: null,
+  collectionId: null,
+  isRefreshing: false
+};
 
-    if (!webflowToken || !collectionId) {
-      return res.status(400).json({ error: 'Missing Webflow token or collection ID' });
-    }
+const CACHE_DURATION = 10 * 60 * 1000; // 10 minutes
+const BACKGROUND_REFRESH_INTERVAL = 10 * 60 * 1000; // 10 minutes
 
-    let url;
-    if (itemId) {
-      url = `https://api.webflow.com/v2/collections/${collectionId}/items/${itemId}`;
-    } else {
-      url = `https://api.webflow.com/v2/collections/${collectionId}/items?limit=${limit}&offset=${offset}`;
-    }
+// Fetch all blogs from Webflow
+async function fetchAllBlogsFromWebflow(collectionId, webflowToken) {
+  console.log('📥 Fetching all blogs from Webflow...');
+  const startTime = Date.now();
+  
+  const allItems = [];
+  const limit = 100;
+  let offset = 0;
+  let hasMore = true;
 
+  while (hasMore) {
+    const url = `https://api.webflow.com/v2/collections/${collectionId}/items?limit=${limit}&offset=${offset}`;
+    
     const response = await fetch(url, {
       headers: {
         'Authorization': `Bearer ${webflowToken}`,
@@ -59,19 +63,188 @@ app.get('/api/webflow', async (req, res) => {
       }
     });
 
-    const data = await response.json();
-    
     if (!response.ok) {
-      return res.status(response.status).json(data);
+      throw new Error(`Webflow API error: ${response.status}`);
     }
 
-    res.json(data);
+    const data = await response.json();
+    const items = data.items || [];
+
+    allItems.push(...items);
+
+    if (items.length < limit) {
+      hasMore = false;
+    } else {
+      offset += limit;
+      // Small delay to avoid rate limits
+      await new Promise(resolve => setTimeout(resolve, 300));
+    }
+  }
+
+  const duration = ((Date.now() - startTime) / 1000).toFixed(1);
+  console.log(`✅ Fetched ${allItems.length} blogs from Webflow in ${duration}s`);
+
+  return { items: allItems };
+}
+
+// Check if cache is valid
+function isCacheValid(collectionId) {
+  if (!blogCache.data) return false;
+  if (blogCache.collectionId !== collectionId) return false;
+  if (!blogCache.timestamp) return false;
+  
+  const age = Date.now() - blogCache.timestamp;
+  return age < CACHE_DURATION;
+}
+
+// Background refresh (optional - keeps cache warm)
+async function backgroundRefreshCache(collectionId, webflowToken) {
+  if (blogCache.isRefreshing) {
+    console.log('⏭️ Skipping background refresh - already in progress');
+    return;
+  }
+
+  blogCache.isRefreshing = true;
+  
+  try {
+    console.log('🔄 Background cache refresh starting...');
+    const freshData = await fetchAllBlogsFromWebflow(collectionId, webflowToken);
+    
+    blogCache.data = freshData;
+    blogCache.timestamp = Date.now();
+    blogCache.collectionId = collectionId;
+    
+    console.log('✅ Background cache refresh complete');
+  } catch (error) {
+    console.error('❌ Background cache refresh failed:', error.message);
+  } finally {
+    blogCache.isRefreshing = false;
+  }
+}
+
+// ============================================
+// CACHED WEBFLOW API PROXY
+// ============================================
+app.get('/api/webflow', async (req, res) => {
+  try {
+    const { collectionId, itemId, limit, offset } = req.query;
+    const webflowToken = req.headers.authorization?.replace('Bearer ', '');
+
+    if (!webflowToken || !collectionId) {
+      return res.status(400).json({ error: 'Missing Webflow token or collection ID' });
+    }
+
+    // Single item fetch (not cached)
+    if (itemId) {
+      console.log(`📄 Fetching single item: ${itemId}`);
+      const url = `https://api.webflow.com/v2/collections/${collectionId}/items/${itemId}`;
+      
+      const response = await fetch(url, {
+        headers: {
+          'Authorization': `Bearer ${webflowToken}`,
+          'accept': 'application/json'
+        }
+      });
+
+      const data = await response.json();
+      
+      if (!response.ok) {
+        return res.status(response.status).json(data);
+      }
+
+      return res.json(data);
+    }
+
+    // List fetch - USE CACHE
+    console.log('📋 Blog list request received');
+
+    // Check if cache is valid
+    if (isCacheValid(collectionId)) {
+      const cacheAge = Math.round((Date.now() - blogCache.timestamp) / 1000);
+      console.log(`✅ Cache HIT! Serving ${blogCache.data.items.length} blogs (age: ${cacheAge}s)`);
+      
+      // Add cache headers
+      res.set('X-Cache', 'HIT');
+      res.set('X-Cache-Age', cacheAge.toString());
+      
+      return res.json(blogCache.data);
+    }
+
+    // Cache miss or expired - fetch fresh data
+    const cacheStatus = !blogCache.data ? 'EMPTY' : 'EXPIRED';
+    console.log(`❌ Cache ${cacheStatus} - fetching from Webflow...`);
+
+    // Prevent multiple concurrent fetches
+    if (blogCache.isRefreshing) {
+      console.log('⏳ Waiting for ongoing refresh...');
+      // Wait up to 3 minutes for the refresh to complete
+      const maxWait = 180000; // 3 minutes
+      const waitStart = Date.now();
+      
+      while (blogCache.isRefreshing && (Date.now() - waitStart) < maxWait) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+      
+      if (isCacheValid(collectionId)) {
+        console.log('✅ Cache populated by concurrent request');
+        res.set('X-Cache', 'WAIT-HIT');
+        return res.json(blogCache.data);
+      }
+    }
+
+    blogCache.isRefreshing = true;
+
+    try {
+      const freshData = await fetchAllBlogsFromWebflow(collectionId, webflowToken);
+      
+      // Update cache
+      blogCache.data = freshData;
+      blogCache.timestamp = Date.now();
+      blogCache.collectionId = collectionId;
+      
+      res.set('X-Cache', 'MISS');
+      res.set('X-Cache-Age', '0');
+      
+      res.json(freshData);
+    } finally {
+      blogCache.isRefreshing = false;
+    }
+
   } catch (error) {
     console.error('Webflow API error:', error);
+    blogCache.isRefreshing = false;
     res.status(500).json({ error: error.message });
   }
 });
 
+// Cache status endpoint (for debugging)
+app.get('/api/cache-status', (req, res) => {
+  const cacheAge = blogCache.timestamp ? Math.round((Date.now() - blogCache.timestamp) / 1000) : null;
+  const isValid = isCacheValid(blogCache.collectionId);
+  
+  res.json({
+    hasCachedData: !!blogCache.data,
+    itemCount: blogCache.data?.items?.length || 0,
+    cacheAgeSeconds: cacheAge,
+    isValid: isValid,
+    collectionId: blogCache.collectionId,
+    isRefreshing: blogCache.isRefreshing,
+    cacheDurationSeconds: CACHE_DURATION / 1000
+  });
+});
+
+// Force cache clear (for debugging)
+app.post('/api/cache-clear', (req, res) => {
+  console.log('🗑️ Cache manually cleared');
+  blogCache.data = null;
+  blogCache.timestamp = null;
+  blogCache.collectionId = null;
+  res.json({ success: true, message: 'Cache cleared' });
+});
+
+// ============================================
+// WEBFLOW UPDATE (No caching needed)
+// ============================================
 app.patch('/api/webflow', async (req, res) => {
   try {
     const { collectionId, itemId } = req.query;
@@ -81,6 +254,8 @@ app.patch('/api/webflow', async (req, res) => {
     if (!webflowToken || !collectionId || !itemId || !fieldData) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
+
+    console.log(`📝 Updating item ${itemId}...`);
 
     const url = `https://api.webflow.com/v2/collections/${collectionId}/items/${itemId}`;
     
@@ -99,6 +274,14 @@ app.patch('/api/webflow', async (req, res) => {
     if (!response.ok) {
       console.error('Webflow PATCH error:', data);
       return res.status(response.status).json(data);
+    }
+
+    console.log('✅ Item updated successfully');
+    
+    // Invalidate cache after update so next fetch gets fresh data
+    if (blogCache.collectionId === collectionId) {
+      console.log('🔄 Cache invalidated due to item update');
+      blogCache.timestamp = 0; // Force refresh on next request
     }
 
     res.json(data);
@@ -392,4 +575,5 @@ Return ONLY rewritten HTML, no explanations.`;
 app.listen(PORT, () => {
   console.log(`🚀 ContentOps backend: port ${PORT}`);
   console.log(`🔍 Google Search: ${GOOGLE_API_KEY ? '✓' : '✗ (pricing skipped)'}`);
+  console.log(`💾 Blog cache: Enabled (${CACHE_DURATION / 1000}s TTL)`);
 });
