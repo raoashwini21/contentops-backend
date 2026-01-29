@@ -187,6 +187,9 @@ app.get('/api/webflow', async (req, res) => {
       res.set('X-Cache', 'HIT');
       res.set('X-Cache-Age', cacheAge.toString());
       
+      // OPTIMIZATION: When serving from cache, return ALL blogs at once (no pagination)
+      // This prevents frontend from making multiple paginated requests
+      // Frontend pagination (limit/offset) only applies to fresh Webflow fetches
       return res.json(blogCache.data);
     }
 
