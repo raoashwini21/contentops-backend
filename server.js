@@ -70,6 +70,8 @@ async function fetchAllBlogsFromWebflow(collectionId, webflowToken) {
     const data = await response.json();
     const items = data.items || [];
 
+    console.log(`  Batch: offset=${offset}, received=${items.length} items`);
+
     allItems.push(...items);
 
     if (items.length < limit) {
@@ -81,10 +83,28 @@ async function fetchAllBlogsFromWebflow(collectionId, webflowToken) {
     }
   }
 
+  // DEDUPLICATE by ID (in case Webflow API returns duplicates)
+  const uniqueItems = [];
+  const seenIds = new Set();
+  
+  for (const item of allItems) {
+    if (!seenIds.has(item.id)) {
+      seenIds.add(item.id);
+      uniqueItems.push(item);
+    }
+  }
+
+  const duplicatesRemoved = allItems.length - uniqueItems.length;
+  
   const duration = ((Date.now() - startTime) / 1000).toFixed(1);
   console.log(`✅ Fetched ${allItems.length} blogs from Webflow in ${duration}s`);
+  if (duplicatesRemoved > 0) {
+    console.log(`⚠️ Removed ${duplicatesRemoved} duplicates → ${uniqueItems.length} unique blogs`);
+  } else {
+    console.log(`✓ All ${uniqueItems.length} blogs are unique (no duplicates)`);
+  }
 
-  return { items: allItems };
+  return { items: uniqueItems };
 }
 
 // Check if cache is valid
