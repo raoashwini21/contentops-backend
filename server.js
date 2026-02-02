@@ -315,7 +315,7 @@ app.patch('/api/webflow', async (req, res) => {
 });
 
 // ============================================
-// SMART ANALYSIS ENDPOINT (HYBRID SEARCH)
+// SMART ANALYSIS ENDPOINT (HYBRID SEARCH + GSC)
 // ============================================
 app.post('/api/analyze', async (req, res) => {
   try {
@@ -325,7 +325,9 @@ app.post('/api/analyze', async (req, res) => {
       anthropicKey, 
       braveKey,
       researchPrompt,
-      writingPrompt
+      writingPrompt,
+      gscKeywords,      // NEW: GSC keywords array from frontend
+      gscPosition       // NEW: Average position from GSC
     } = req.body;
 
     if (!blogContent || !anthropicKey) {
@@ -340,10 +342,18 @@ app.post('/api/analyze', async (req, res) => {
 
     const startTime = Date.now();
 
+    console.log('=== ANALYSIS REQUEST ===');
+    console.log('Blog title:', title);
+    console.log('Content length:', blogContent.length);
+    console.log('GSC keywords:', gscKeywords ? gscKeywords.length : 0);
+    if (gscPosition) {
+      console.log('GSC avg position:', gscPosition.toFixed(1));
+    }
+
     // ============================================
     // STAGE 1: QUERY GENERATION
     // ============================================
-    console.log('=== STAGE 1: QUERY GENERATION ===');
+    console.log('\n=== STAGE 1: QUERY GENERATION ===');
     
     const queryPrompt = `Generate 6-8 search queries to fact-check this blog: "${title}"
 
@@ -503,9 +513,73 @@ Return JSON array: ["query1", "query2", ...]`;
     console.log(`\n✓ Search complete: ${totalSearchesUsed} total`);
 
     // ============================================
-    // STAGE 3: CONTENT REWRITING
+    // STAGE 3: CONTENT REWRITING (WITH GSC OPTIMIZATION)
     // ============================================
     console.log('\n=== STAGE 3: CONTENT REWRITING ===');
+
+    // Build enhanced writing prompt with GSC data
+    let enhancedWritingPrompt = writingPrompt;
+    
+    if (gscKeywords && gscKeywords.length > 0) {
+      console.log('🎯 GSC optimization enabled');
+      
+      // Sort by position (best opportunities first)
+      const sortedKeywords = [...gscKeywords]
+        .sort((a, b) => a.position - b.position)
+        .slice(0, 10); // Top 10 opportunities
+      
+      const gscSection = `
+
+**CRITICAL: GSC KEYWORD OPTIMIZATION (HIGH PRIORITY)**
+
+You have access to Google Search Console data showing keyword opportunities for this blog.
+These keywords are ALREADY ranking but need optimization to rank higher.
+
+Top Keyword Opportunities:
+${sortedKeywords.map((k, i) => `
+${i + 1}. "${k.query}"
+   - Current Position: ${k.position.toFixed(1)}
+   - Clicks/month: ${Math.round(k.clicks)}
+   - Impressions: ${Math.round(k.impressions)}
+   ${k.position <= 10 ? '   🎯 HIGH PRIORITY: Page 1 opportunity!' : ''}
+   ${k.position > 10 && k.position <= 15 ? '   🔍 MEDIUM PRIORITY: Good potential' : ''}
+   ${k.position > 15 ? '   💡 LOW PRIORITY: Long-term play' : ''}
+`).join('')}
+
+**YOUR GSC OPTIMIZATION TASKS:**
+
+1. **Optimize Existing Headings:**
+   - If a heading is SIMILAR to a GSC keyword, change it to the EXACT keyword
+   - Example: "Top Automation Tools" → "LinkedIn Automation Tools" (if that's the keyword)
+   - Keep heading level the same (H2 stays H2)
+
+2. **Add New Sections for Missing Keywords:**
+   - If a high-priority keyword is NOT in any heading, add a new section
+   - Use the exact keyword as the heading
+   - Write 2-3 paragraphs of relevant content
+
+3. **FAQ Sections for Question Keywords:**
+   - Keywords starting with "how", "is", "what", "why", "can" = Questions
+   - Add as H3 with the exact question
+   - Provide a direct answer in the next paragraph
+
+4. **Keyword Integration Rules:**
+   - Use EXACT keyword phrases from GSC (don't paraphrase)
+   - Make it natural (not keyword-stuffed)
+   - Prioritize keywords with position 4-10 (almost Page 1)
+   - Add keywords to headings AND body text naturally
+
+5. **What NOT to Do:**
+   - Don't change heading hierarchy (H2 → H3 etc)
+   - Don't keyword stuff (use each keyword 2-3 times max)
+   - Don't remove existing good content
+   - Don't force keywords where they don't fit naturally
+
+**REMEMBER:** GSC keywords take PRIORITY over general rewrites. If you must choose between a small style improvement and adding a GSC keyword, ALWAYS add the GSC keyword.
+`;
+      
+      enhancedWritingPrompt = writingPrompt + gscSection;
+    }
 
     const MAX_CHUNK = 15000;
     let chunks = [];
@@ -537,7 +611,7 @@ Return JSON array: ["query1", "query2", ...]`;
       
       console.log(`Processing chunk ${i + 1}/${chunks.length}...`);
 
-      const rewritePrompt = `Rewrite based on search findings.
+      const rewritePrompt = `Rewrite based on search findings and GSC keywords.
 
 SEARCH RESULTS:
 ${findings}
@@ -553,6 +627,7 @@ RULES:
 ✅ Preserve ALL HTML structure exactly
 ✅ Keep heading levels exact (H1-H6)
 ✅ Keep all links, images, widgets exact
+${gscKeywords && gscKeywords.length > 0 ? '✅ OPTIMIZE for GSC keywords (see instructions above)' : ''}
 
 🤖 SALESROBOT: If mentioned, ADD AI features found:
 - AI message optimization
@@ -566,7 +641,7 @@ Return ONLY rewritten HTML, no explanations.`;
       const rewriteResponse = await anthropic.messages.create({
         model: 'claude-sonnet-4-20250514',
         max_tokens: 16000,
-        system: writingSystemPrompt,
+        system: enhancedWritingPrompt,
         messages: [{ role: 'user', content: rewritePrompt }]
       });
 
@@ -578,7 +653,10 @@ Return ONLY rewritten HTML, no explanations.`;
 
     const duration = ((Date.now() - startTime) / 1000).toFixed(1);
     
-    console.log(`\n✅ COMPLETE: ${duration}s | ${totalSearchesUsed} searches | ${totalClaudeCalls} Claude calls\n`);
+    console.log(`\n✅ COMPLETE: ${duration}s | ${totalSearchesUsed} searches | ${totalClaudeCalls} Claude calls`);
+    if (gscKeywords && gscKeywords.length > 0) {
+      console.log(`🎯 GSC-optimized with ${gscKeywords.length} keywords\n`);
+    }
 
     res.json({
       content: finalContent,
@@ -586,7 +664,8 @@ Return ONLY rewritten HTML, no explanations.`;
       searchesUsed: totalSearchesUsed,
       claudeCalls: totalClaudeCalls,
       sectionsUpdated: chunks.length,
-      duration: parseFloat(duration)
+      duration: parseFloat(duration),
+      gscOptimized: gscKeywords && gscKeywords.length > 0
     });
 
   } catch (error) {
@@ -599,4 +678,5 @@ app.listen(PORT, () => {
   console.log(`🚀 ContentOps backend: port ${PORT}`);
   console.log(`🔍 Google Search: ${GOOGLE_API_KEY ? '✓' : '✗ (pricing skipped)'}`);
   console.log(`💾 Blog cache: Enabled (${CACHE_DURATION / 1000}s TTL)`);
+  console.log(`🎯 GSC optimization: Enabled`);
 });
