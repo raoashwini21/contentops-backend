@@ -123,25 +123,102 @@ async function fetchAllBlogs(collectionId, token) {
 }
 
 // ════════════════════════════════════════════
-// WIDGET PROTECTION
+// WIDGET PROTECTION (nested-tag-aware)
 // ════════════════════════════════════════════
 function protectWidgets(html) {
   const widgets = [];
-  const protectedHtml = html.replace(
-    /(<(?:iframe|script|embed|object)[^>]*>(?:[\s\S]*?<\/(?:iframe|script|embed|object)>)?)|(<div[^>]*class="[^"]*(?:w-embed|w-widget|widget|embed)[^"]*"[^>]*>[\s\S]*?<\/div>)|(<figure[^>]*>[\s\S]*?<\/figure>)|(<video[^>]*>[\s\S]*?<\/video>)/gi,
-    (match) => {
-      const id = `___WIDGET_${widgets.length}___`;
-      widgets.push(match);
-      return id;
+
+  // Depth-tracking: finds correct closing tag even with nested same-tags
+  function extractBlock(src, startIdx, tagName) {
+    const openTag = '<' + tagName;
+    const closeTag = '</' + tagName + '>';
+    const openLen = openTag.length;
+    const closeLen = closeTag.length;
+    let depth = 1;
+    const firstClose = src.indexOf('>', startIdx);
+    if (firstClose === -1) return null;
+    if (src[firstClose - 1] === '/') return src.substring(startIdx, firstClose + 1);
+    let i = firstClose + 1;
+    const srcLower = src.toLowerCase();
+    const openLower = openTag.toLowerCase();
+    const closeLower = closeTag.toLowerCase();
+    while (i < src.length && depth > 0) {
+      const nextOpen = srcLower.indexOf(openLower, i);
+      const nextClose = srcLower.indexOf(closeLower, i);
+      if (nextClose === -1) break;
+      if (nextOpen !== -1 && nextOpen < nextClose) {
+        depth++;
+        i = nextOpen + openLen;
+      } else {
+        depth--;
+        if (depth === 0) return src.substring(startIdx, nextClose + closeLen);
+        i = nextClose + closeLen;
+      }
     }
-  );
+    // Fallback: same as old regex — grab to first close tag
+    const fb = srcLower.indexOf(closeLower, startIdx + openLen);
+    return fb !== -1 ? src.substring(startIdx, fb + closeLen) : null;
+  }
+
+  const patterns = [
+    /<div[^>]*class="[^"]*(?:w-embed|w-widget|widget|embed)[^"]*"[^>]*>/gi,
+    /<iframe[^>]*/gi,
+    /<script[^>]*/gi,
+    /<figure[^>]*/gi,
+    /<video[^>]*/gi,
+    /<embed[^>]*/gi,
+    /<object[^>]*/gi,
+  ];
+
+  const found = [];
+  for (const pattern of patterns) {
+    pattern.lastIndex = 0;
+    let match;
+    while ((match = pattern.exec(html)) !== null) {
+      const tagMatch = match[0].match(/^<(\w+)/);
+      if (!tagMatch) continue;
+      const block = extractBlock(html, match.index, tagMatch[1]);
+      if (!block) continue;
+      const endIdx = match.index + block.length;
+      const overlaps = found.some(f =>
+        (match.index >= f.start && match.index < f.end) ||
+        (endIdx > f.start && endIdx <= f.end)
+      );
+      if (!overlaps) found.push({ start: match.index, end: endIdx, content: block });
+    }
+  }
+
+  found.sort((a, b) => a.start - b.start);
+
+  let protectedHtml = html;
+  let offset = 0;
+  for (const item of found) {
+    const id = `___WIDGET_${widgets.length}___`;
+    widgets.push(item.content);
+    const s = item.start + offset;
+    const e = item.end + offset;
+    protectedHtml = protectedHtml.substring(0, s) + id + protectedHtml.substring(e);
+    offset += id.length - (item.end - item.start);
+  }
+
   return { protectedHtml, widgets };
 }
 
 function restoreWidgets(html, widgets) {
   let restored = html;
   widgets.forEach((widget, i) => {
-    restored = restored.replace(`___WIDGET_${i}___`, widget);
+    const placeholder = `___WIDGET_${i}___`;
+    if (restored.includes(placeholder)) {
+      restored = restored.replace(placeholder, widget);
+      // Remove any duplicates Claude may have created
+      while (restored.includes(placeholder)) {
+        restored = restored.replace(placeholder, '');
+      }
+    } else {
+      // Claude removed the placeholder — append at end so content isn't lost
+      console.warn(`  ⚠ Widget ${i} placeholder missing — appending at end`);
+      restored += widget;
+    }
   });
   return restored;
 }
@@ -318,6 +395,10 @@ app.post('/api/smartcheck', async (req, res) => {
     console.log('=== Stage 0: Widget Protection ===');
     const { protectedHtml: protectedContent, widgets } = protectWidgets(blogContent);
     console.log(`  Protected ${widgets.length} widgets/embeds`);
+    widgets.forEach((w, i) => {
+      const preview = w.substring(0, 100).replace(/\n/g, ' ').trim();
+      console.log(`    Widget ${i}: ${preview}...`);
+    });
 
     // ── 1. Generate search queries ──
     console.log('=== Stage 1: Query Gen ===');
@@ -477,6 +558,19 @@ ABSOLUTE RULES — violating any is a failure:
     updated = restoreWidgets(updated, widgets);
     console.log(`  Restored ${widgets.length} widgets`);
 
+    // ── Content safety check ──
+    const stripTags = (h) => h.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    const originalLen = stripTags(blogContent).length;
+    const updatedLen = stripTags(updated).length;
+    const ratio = updatedLen / Math.max(originalLen, 1);
+    console.log(`  Content check: original ${originalLen} chars → updated ${updatedLen} chars (${(ratio * 100).toFixed(0)}%)`);
+
+    let contentWarning = null;
+    if (ratio < 0.5 && originalLen > 500) {
+      contentWarning = `Updated content is only ${(ratio * 100).toFixed(0)}% of original length. Some content may have been lost — please review carefully.`;
+      console.warn(`  ⚠ ${contentWarning}`);
+    }
+
     // Check if TL;DR was actually added
     const tldrAdded = addTldr && (updated.toLowerCase().includes('tl;dr') || updated.includes('tldr-box'));
 
@@ -493,7 +587,8 @@ ABSOLUTE RULES — violating any is a failure:
         widgetsProtected: widgets.length
       },
       research: unique.slice(0, 15),
-      tldrAdded
+      tldrAdded,
+      contentWarning
     };
 
     setCache(analysisCache, contentHash, result);
