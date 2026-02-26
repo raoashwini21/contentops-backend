@@ -162,6 +162,7 @@ function protectWidgets(html) {
 
   const patterns = [
     /<div[^>]*class="[^"]*(?:w-embed|w-widget|widget|embed)[^"]*"[^>]*>/gi,
+    /<table[^>]*/gi,
     /<iframe[^>]*/gi,
     /<script[^>]*/gi,
     /<figure[^>]*/gi,
