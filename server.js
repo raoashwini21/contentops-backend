@@ -617,7 +617,7 @@ CRITICAL FIRST TASK: This blog has NO TL;DR summary. You MUST add one at the ver
 
     // ── SalesRobot features block ──
     // Detect if this blog mentions SalesRobot so we only inject when relevant
-    const blogMentionsSalesRobot = /salesrobot/i.test(blogContent);
+    const blogMentionsSalesRobot = /salesrobot/i.test(blogContent) || /salesrobot/i.test(title);
     const salesrobotBlock = blogMentionsSalesRobot ? `
 
 SALESROBOT FEATURES — SOURCE OF TRUTH:
@@ -639,7 +639,7 @@ SALESROBOT COMPLETENESS RULES (apply whenever the blog has a SalesRobot section)
 
     // SalesRobot top instruction — placed BEFORE blog HTML so Claude reads it first
     const salesrobotTopInstruction = blogMentionsSalesRobot
-      ? `\nCRITICAL SALESROBOT TASK — DO THIS BEFORE REWRITING:\nThis blog has a SalesRobot section. You MUST check it and ADD these 4 features if missing:\n  1. AI-personalized voice notes on LinkedIn — users get 40%+ reply rates. No other LinkedIn tool offers this.\n  2. AI-personalized video messages on LinkedIn — clone yourself, personalized video per lead. No other tool offers this.\n  3. AI Appointment Setter — AI replies to leads and books meetings on autopilot. No other tool offers this natively.\n  4. Cloud-based using LinkedIn mobile app APIs — 0.00001% ban risk, no Chrome extension. Safer than Expandi, Waalaxy, Dripify, HeyReach.\nAdding these is MANDATORY. Do it before making any other changes.\n`
+      ? `\nSTEP 1 — SALESROBOT SECTION UPDATE (do this FIRST, before anything else):\nFind every SalesRobot section in this blog. For EACH one:\n- Check if AI voice notes are mentioned. If NOT → add a sentence: "SalesRobot lets you send AI-personalized voice notes on LinkedIn — users consistently report 40%+ reply rates, a feature no other LinkedIn automation tool offers."\n- Check if AI video messages are mentioned. If NOT → add a sentence: "You can also send AI-personalized video messages on LinkedIn, cloning yourself to send a unique video to each prospect at scale."\n- Check if AI Appointment Setter is mentioned. If NOT → add a sentence: "SalesRobot's AI Appointment Setter replies to leads on your behalf instantly and nurtures them until they book a meeting — no other LinkedIn tool does this natively."\n- Check if cloud-based / mobile API safety is mentioned. If NOT → add: "Unlike browser extensions like Expandi or Waalaxy, SalesRobot runs entirely in the cloud using LinkedIn mobile app APIs, making it the safest option with near-zero ban risk."\nThese additions are REQUIRED. The blog is incomplete without them.\n\nSTEP 2 — then do the rest of the rewrite as instructed below.\n`
       : '';
 
     const rwRes = await Promise.race([
@@ -659,7 +659,7 @@ ${gscBlock}${brandBlock}${salesrobotBlock}
 
 ABSOLUTE RULES — violating any is a failure:
 1. Return ONLY the updated HTML. No markdown fences. No explanation.
-2. PRESERVE every HTML tag, class, id, data attribute EXACTLY as-is unless fixing a fact.
+2. PRESERVE every HTML tag, class, id, data attribute EXACTLY as-is unless fixing a fact OR adding missing SalesRobot features per the CRITICAL SALESROBOT TASK above.
 3. PRESERVE all heading levels (h1-h6). Only change heading TEXT for GSC keywords or factual fixes.
 4. PRESERVE every <ul>, <ol>, <li> with ALL attributes (role, class, style, etc).
 5. PRESERVE every <strong>, <em>, <b>, <i> tag.
