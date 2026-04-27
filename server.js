@@ -128,7 +128,6 @@ async function fetchAllBlogs(collectionId, token) {
 function protectWidgets(html) {
   const widgets = [];
 
-  // Depth-tracking: finds correct closing tag even with nested same-tags
   function extractBlock(src, startIdx, tagName) {
     const openTag = '<' + tagName;
     const closeTag = '</' + tagName + '>';
@@ -155,7 +154,6 @@ function protectWidgets(html) {
         i = nextClose + closeLen;
       }
     }
-    // Fallback: same as old regex — grab to first close tag
     const fb = srcLower.indexOf(closeLower, startIdx + openLen);
     return fb !== -1 ? src.substring(startIdx, fb + closeLen) : null;
   }
@@ -211,18 +209,131 @@ function restoreWidgets(html, widgets) {
     const placeholder = `___WIDGET_${i}___`;
     if (restored.includes(placeholder)) {
       restored = restored.replace(placeholder, widget);
-      // Remove any duplicates Claude may have created
       while (restored.includes(placeholder)) {
         restored = restored.replace(placeholder, '');
       }
     } else {
-      // Claude removed the placeholder — append at end so content isn't lost
       console.warn(`  ⚠ Widget ${i} placeholder missing — appending at end`);
       restored += widget;
     }
   });
   return restored;
 }
+
+// ════════════════════════════════════════════
+// SALESROBOT FEATURES — Source of truth
+// Sourced directly from salesrobot.co and salesrobot.co/pricing
+// Last updated: April 2026
+// Update this block whenever features ship or pricing changes.
+// ════════════════════════════════════════════
+const SALESROBOT_FEATURES = `
+SALESROBOT — VERIFIED FEATURES (source: salesrobot.co — use as source of truth for all SalesRobot sections)
+
+CORE LINKEDIN ACTIONS:
+- Send connection requests in bulk (up to 75/day on paid plans)
+- Send LinkedIn messages and follow-ups automatically
+- Send InMails to open profiles (up to 50/day on paid plans, no InMail credits consumed)
+- Profile views, post likes, follows, skill endorsements, event invites — all automated
+- Comment on prospects' posts automatically
+- Import leads from: LinkedIn search, Sales Navigator search, LinkedIn Recruiter, CSV, Google Sheets
+- Import leads who are members of a specific LinkedIn group
+- Import leads who attended a specific LinkedIn event
+- Import everyone who commented on a specific LinkedIn post — then connect with them
+- Send PDFs, documents, and attachments in LinkedIn messages
+
+AI VOICE & VIDEO (key differentiator — no other tool does this):
+- Send AI-personalized voice notes on LinkedIn at scale (users report 40%+ reply rates)
+- Send AI-personalized video messages on LinkedIn at scale — clone yourself, each lead gets a personalized video
+- Voice & Video Message Personalization available on all paid plans (up to 50/day)
+- This is a unique SalesRobot feature not offered by Expandi, Waalaxy, Dripify, HeyReach, or most competitors
+
+AI APPOINTMENT SETTER (add-on, key differentiator):
+- AI agent that replies to leads instantly on your behalf in the LinkedIn inbox
+- Nurtures leads and keeps them engaged on LinkedIn until they're ready to book a meeting
+- Fully trainable on your company, product, and tone
+- Responds within minutes — if you don't reply within 5 mins, chances of converting fall by 50%
+- No other LinkedIn automation tool offers this natively
+- Available as an add-on across all plans
+
+EMAIL OUTREACH:
+- Unlimited cold email automation included
+- Works with Gmail, Outlook, and custom SMTP
+- Multi-step LinkedIn + Email sequences in a single campaign (true multichannel)
+- Unlimited email warmup included
+
+SAFETY (core differentiator):
+- Uses LinkedIn mobile app APIs on the backend — reduces ban risk to 0.00001%
+- Cloud-based: runs 24/7 even when laptop is closed, no Chrome extension required
+- Dedicated, local residential IP rotation per account
+- Human-like behavior simulation (randomized delays, working-hours scheduling)
+- Compliance with LinkedIn daily limits built in
+- Safer than browser-extension tools like Expandi, Waalaxy, Dux-Soup, LinkedHelper
+
+AI & INTELLIGENCE:
+- AI Variables: auto-personalizes message copy for each prospect
+- Smart Reply Detection (TM): pauses sequences automatically when a lead replies
+- Smart Reply Suggestions in inbox
+- AI Message Scoring
+- Auto-Tagging & Segmentation of leads
+- AI Lead Scoring and Filtering (coming soon on Basic, available on Advanced and Professional)
+- Dynamic follow-ups with AI personalization
+
+INBOX & CRM:
+- Unified inbox: LinkedIn + Email in one place (Advanced and Professional plans)
+- Notes and tags on leads (Advanced and Professional)
+- Resume leads in sequence
+- Save sequences as reusable templates
+- Pre-built and customizable sequence templates
+- LinkedIn lead transfer to CRM (Advanced and Professional)
+- Lead info scraping: email and phone number found from LinkedIn profiles
+- Anti-duplication and activity control (Professional only)
+
+INTEGRATIONS:
+- Webhooks and Zapier (Advanced and Professional)
+- Native HubSpot, Pipedrive, and Salesforce sync (Advanced and Professional)
+- Google Sheets and Slack notifications (Advanced and Professional)
+- SalesRobot API access for custom integrations
+- Custom variables support
+
+ANALYTICS:
+- Daily, weekly, monthly stats per campaign
+- Real-time campaign performance reports
+- Account-level analytics
+- Team analytics dashboard (Advanced and Professional)
+- A/B testing for message variants (Advanced and Professional)
+
+TEAM & AGENCY:
+- Multi-user workspace with roles and permissions (Professional only)
+- One-click access to all team/client accounts
+- Share sequences and templates across team
+- Track team performance and prevent duplicate outreach
+- Manage team subscriptions from one dashboard
+- Whitelabel: resell SalesRobot under your own brand — 110+ agencies already doing this, earning $10k+/month
+
+SUPPORT:
+- 24/7 live chat support on all plans
+- Onboarding and training call (Advanced and Professional)
+- Priority support SLA (Professional only)
+- 14-day free trial, no credit card required
+
+PRICING (billed annually):
+- Basic: $39/LinkedIn account/month — 1 active campaign, limited daily quotas (20/action/day)
+- Advanced: $59/LinkedIn account/month — unlimited campaigns, full quotas (75 connections/day, 50 InMails/day), unified inbox, A/B testing, webhooks, CRM integrations
+- Professional: $79/LinkedIn account/month — everything in Advanced plus team management, activity control, anti-duplication, priority support
+- Enterprise: custom pricing — dedicated support, customer success manager, premium onboarding
+- Monthly pricing (no annual discount): Basic $59, Advanced $79, Professional $99
+- Email automation add-on: $15/email account/month
+- Lead enrichment credits: 3000 credits for $43/month (1 email found = 3 credits, 225 free credits included)
+- All plans include AI Appointment Setter
+
+KEY STATS TO USE IN BLOGS:
+- 4,100+ users
+- Users average 55% reply rate
+- 76% of free trials get their first lead within 2 days
+- Users report 40%+ reply rates with voice note campaigns
+- 110+ agencies on whitelabel program
+- salesrobot.co is the official website
+`;
 
 // ════════════════════════════════════════════
 // GET /api/webflow
@@ -295,28 +406,18 @@ app.patch('/api/webflow', async (req, res) => {
 });
 
 // ════════════════════════════════════════════
-// POST /api/upload-image — Accepts multipart/form-data
-// Fixed: uses multer to parse the file from browser FormData
-// ════════════════════════════════════════════
-// ════════════════════════════════════════════
-// POST /api/upload-image — Simple passthrough
-// Images are inserted directly as base64 or URL into the blog HTML.
-// No Webflow Assets API needed (matches working v1 approach).
+// POST /api/upload-image
 // ════════════════════════════════════════════
 app.post('/api/upload-image', upload.single('file'), async (req, res) => {
   try {
     const file = req.file;
-
     if (!file) return res.status(400).json({ error: 'No file uploaded.' });
     if (!file.mimetype.startsWith('image/')) return res.status(400).json({ error: 'File must be an image' });
     if (file.size > 4 * 1024 * 1024) return res.status(400).json({ error: 'Image too large (max 4MB)' });
 
-    // Convert to base64 data URI — inserted directly into HTML
     const base64 = file.buffer.toString('base64');
     const dataUri = `data:${file.mimetype};base64,${base64}`;
-
-    console.log(`📸 Image converted to base64: ${file.originalname} (${(file.size / 1024).toFixed(1)}KB)`);
-
+    console.log(`Image converted to base64: ${file.originalname} (${(file.size / 1024).toFixed(1)}KB)`);
     res.json({ url: dataUri });
   } catch (err) {
     console.error('Image upload error:', err);
@@ -365,7 +466,6 @@ async function googleSearch(query, key, cx, count = 5) {
 
 // ════════════════════════════════════════════
 // POST /api/smartcheck — Research + Rewrite
-// Now supports: brandHints, addTldr
 // ════════════════════════════════════════════
 app.post('/api/smartcheck', async (req, res) => {
   try {
@@ -404,7 +504,6 @@ app.post('/api/smartcheck', async (req, res) => {
     // ── 1. Generate search queries ──
     console.log('=== Stage 1: Query Gen ===');
 
-    // Build brand-aware query generation prompt
     let brandQueryHint = '';
     if (brandHints && brandHints.length > 0) {
       brandQueryHint = `\n\nIMPORTANT CONTEXT:\n${brandHints.join('\n')}\nMake sure search queries target the CORRECT product/brand. For example, if the blog is about Copilot.ai (sales tool), search for "copilot.ai pricing" NOT "microsoft copilot pricing".`;
@@ -478,6 +577,7 @@ Include year 2025/2026 for latest info.` }]
       `[${r.source?.toUpperCase()}] ${r.title}\nURL: ${r.url}\n${r.snippet}`
     ).join('\n\n');
 
+    // ── GSC block ──
     let gscBlock = '';
     if (gscKeywords?.length > 0) {
       gscBlock = `
@@ -492,7 +592,7 @@ GSC RULES:
 - Do NOT keyword-stuff`;
     }
 
-    // Brand disambiguation block for Claude rewrite
+    // ── Brand disambiguation block ──
     let brandBlock = '';
     if (brandHints && brandHints.length > 0) {
       brandBlock = `
@@ -502,7 +602,7 @@ ${brandHints.join('\n')}
 READ THE ENTIRE BLOG FIRST to understand which product is being discussed. Only use research results that match the correct brand/product. Discard any search results about the wrong product.`;
     }
 
-    // TL;DR instruction — injected at TOP of prompt and as a rule
+    // ── TL;DR instruction ──
     let tldrTopInstruction = '';
     let tldrRule = '';
     if (addTldr) {
@@ -515,11 +615,28 @@ CRITICAL FIRST TASK: This blog has NO TL;DR summary. You MUST add one at the ver
 16. ADD a TL;DR box at the VERY TOP of the output using: <div class="tldr-box"><p><strong>TL;DR:</strong> [summary]</p></div>`;
     }
 
+    // ── SalesRobot features block ──
+    // Detect if this blog mentions SalesRobot so we only inject when relevant
+    const blogMentionsSalesRobot = /salesrobot/i.test(blogContent);
+    const salesrobotBlock = blogMentionsSalesRobot ? `
+
+SALESROBOT FEATURES — SOURCE OF TRUTH:
+${SALESROBOT_FEATURES}
+
+SALESROBOT COMPLETENESS RULES (apply whenever the blog has a SalesRobot section):
+- READ the current SalesRobot section in the blog carefully.
+- COMPARE it against the feature list above.
+- If any features from the list above are MISSING from the blog's SalesRobot section and are RELEVANT to the blog topic (e.g. a comparison blog about LinkedIn tools should mention cloud-based safety, multichannel sequences, smart inbox), ADD them naturally into the existing section.
+- Do NOT dump the entire feature list — only add features that are directly relevant to what the blog is comparing or reviewing.
+- Keep SalesRobot's tone positive but honest. Do not oversell.
+- If the blog has a comparison table that includes SalesRobot, make sure SalesRobot's row/column reflects its actual capabilities from the list above.
+- NEVER remove existing SalesRobot content — only add to it or correct it.` : '';
+
     const rwRes = await Promise.race([
       anthropic.messages.create({
         model: 'claude-sonnet-4-20250514',
         max_tokens: 16000,
-        messages: [{ role: 'user', content: `You are an expert blog content updater. Rewrite this blog using the research below.
+        messages: [{ role: 'user', content: `You are an expert blog content updater for SalesRobot, a LinkedIn and email outreach automation tool. Rewrite this blog using the research below.
 ${tldrTopInstruction}
 TITLE: ${title}
 
@@ -528,7 +645,7 @@ ${protectedContent}
 
 RESEARCH:
 ${research}
-${gscBlock}${brandBlock}
+${gscBlock}${brandBlock}${salesrobotBlock}
 
 ABSOLUTE RULES — violating any is a failure:
 1. Return ONLY the updated HTML. No markdown fences. No explanation.
@@ -539,7 +656,7 @@ ABSOLUTE RULES — violating any is a failure:
 6. PRESERVE every <a> with href, target, rel attributes.
 7. PRESERVE every <img> with src, alt, loading, width, height, class, style attributes.
 8. PRESERVE every placeholder like ___WIDGET_0___, ___WIDGET_1___ etc.
-9. Fix outdated facts (pricing, features, stats) using research data.
+9. Fix outdated facts (pricing, features, stats) using research data. If research conflicts with the blog, prefer the most recent official source.
 10. New lists MUST use: <ul role="list"><li role="listitem">text</li></ul>
 11. New bold = <strong>, new italic = <em>. Never markdown.
 12. Use active voice. Remove em-dashes. Use contractions where natural.
@@ -572,7 +689,6 @@ ABSOLUTE RULES — violating any is a failure:
       console.warn(`  ⚠ ${contentWarning}`);
     }
 
-    // Check if TL;DR was actually added
     const tldrAdded = addTldr && (updated.toLowerCase().includes('tl;dr') || updated.includes('tldr-box'));
 
     const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
