@@ -637,12 +637,17 @@ SALESROBOT COMPLETENESS RULES (apply whenever the blog has a SalesRobot section)
 - If the blog has a comparison table that includes SalesRobot, make sure SalesRobot's row/column reflects its actual capabilities — especially voice notes, video messages, and AI Appointment Setter.
 - NEVER remove existing SalesRobot content — only add to it or correct it.` : '';
 
+    // SalesRobot top instruction — placed BEFORE blog HTML so Claude reads it first
+    const salesrobotTopInstruction = blogMentionsSalesRobot
+      ? `\nCRITICAL SALESROBOT TASK — DO THIS BEFORE REWRITING:\nThis blog has a SalesRobot section. You MUST check it and ADD these 4 features if missing:\n  1. AI-personalized voice notes on LinkedIn — users get 40%+ reply rates. No other LinkedIn tool offers this.\n  2. AI-personalized video messages on LinkedIn — clone yourself, personalized video per lead. No other tool offers this.\n  3. AI Appointment Setter — AI replies to leads and books meetings on autopilot. No other tool offers this natively.\n  4. Cloud-based using LinkedIn mobile app APIs — 0.00001% ban risk, no Chrome extension. Safer than Expandi, Waalaxy, Dripify, HeyReach.\nAdding these is MANDATORY. Do it before making any other changes.\n`
+      : '';
+
     const rwRes = await Promise.race([
       anthropic.messages.create({
         model: 'claude-sonnet-4-20250514',
-        max_tokens: 16000,
+        max_tokens: 32000,
         messages: [{ role: 'user', content: `You are an expert blog content updater for SalesRobot, a LinkedIn and email outreach automation tool. Rewrite this blog using the research below.
-${tldrTopInstruction}
+${tldrTopInstruction}${salesrobotTopInstruction}
 TITLE: ${title}
 
 CURRENT HTML:
@@ -667,7 +672,7 @@ ABSOLUTE RULES — violating any is a failure:
 12. Use active voice. Remove em-dashes. Use contractions where natural.
 13. NEVER strip attributes from any existing element.
 14. NEVER convert HTML to markdown.
-15. DO NOT remove or modify any ___WIDGET_N___ markers.${tldrRule}` }]
+15. DO NOT remove or modify any ___WIDGET_N___ markers.${tldrRule}${blogMentionsSalesRobot ? "\n16. MANDATORY: Add voice notes, video messages, AI Appointment Setter, and cloud-based API safety to every SalesRobot section if any are missing." : ""}` }]
       }),
       new Promise((_, reject) => setTimeout(() => reject(new Error('Content rewrite timeout')), 300000))
     ]);
