@@ -626,10 +626,15 @@ ${SALESROBOT_FEATURES}
 SALESROBOT COMPLETENESS RULES (apply whenever the blog has a SalesRobot section):
 - READ the current SalesRobot section in the blog carefully.
 - COMPARE it against the feature list above.
-- If any features from the list above are MISSING from the blog's SalesRobot section and are RELEVANT to the blog topic (e.g. a comparison blog about LinkedIn tools should mention cloud-based safety, multichannel sequences, smart inbox), ADD them naturally into the existing section.
-- Do NOT dump the entire feature list — only add features that are directly relevant to what the blog is comparing or reviewing.
+- ALWAYS add these features if missing — they are ALWAYS relevant for any LinkedIn tool review or alternatives blog:
+  * AI-personalized voice notes on LinkedIn (40%+ reply rates) — this is a key differentiator
+  * AI-personalized video messages on LinkedIn — clone yourself, send personalized videos at scale
+  * AI Appointment Setter — AI that replies to leads and books meetings on autopilot, no other tool does this
+  * Cloud-based with LinkedIn mobile app APIs (not a Chrome extension) — near-zero ban risk
+- Also add if missing and relevant: multichannel LinkedIn + email sequences, unified inbox, Smart Reply Detection, pricing
+- Do NOT dump the entire feature list — focus on the above must-haves plus what's relevant to the blog topic.
 - Keep SalesRobot's tone positive but honest. Do not oversell.
-- If the blog has a comparison table that includes SalesRobot, make sure SalesRobot's row/column reflects its actual capabilities from the list above.
+- If the blog has a comparison table that includes SalesRobot, make sure SalesRobot's row/column reflects its actual capabilities — especially voice notes, video messages, and AI Appointment Setter.
 - NEVER remove existing SalesRobot content — only add to it or correct it.` : '';
 
     const rwRes = await Promise.race([
