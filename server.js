@@ -200,24 +200,172 @@ function protectWidgets(html) {
     offset += id.length - (item.end - item.start);
   }
 
-  return { protectedHtml, widgets };
+  // record nearest preceding heading for each widget (anchor for recovery)
+  const anchored = widgets.map((content, i) => {
+    // find this widget's placeholder position in protectedHtml
+    const pos = protectedHtml.indexOf(`___WIDGET_${i}___`);
+    let anchor = null;
+    if (pos > -1) {
+      const before = protectedHtml.substring(0, pos);
+      const hMatch = before.match(/<h([1-6])[^>]*>([\s\S]*?)<\/h\1>(?![\s\S]*<h[1-6])/i);
+      if (hMatch) anchor = hMatch[0];
+    }
+    return { content, anchor };
+  });
+
+  return { protectedHtml, widgets: anchored };
 }
 
 function restoreWidgets(html, widgets) {
   let restored = html;
-  widgets.forEach((widget, i) => {
-    const placeholder = `___WIDGET_${i}___`;
-    if (restored.includes(placeholder)) {
-      restored = restored.replace(placeholder, widget);
-      while (restored.includes(placeholder)) {
-        restored = restored.replace(placeholder, '');
-      }
-    } else {
-      console.warn(`  ⚠ Widget ${i} placeholder missing — appending at end`);
-      restored += widget;
+  const warnings = [];
+
+  widgets.forEach((w, i) => {
+    const widget = w.content;
+    const exact = `___WIDGET_${i}___`;
+
+    // 1) exact match
+    if (restored.includes(exact)) {
+      restored = restored.split(exact).join('\u0000PLACEHOLDER\u0000');
+      restored = restored.replace('\u0000PLACEHOLDER\u0000', widget);
+      restored = restored.split('\u0000PLACEHOLDER\u0000').join('');
+      return;
     }
+
+    // 2) tolerant match: escaped underscores, stray spaces, wrapped in tags
+    //    matches things like \_\_\_WIDGET\_0\_\_\_, ___ WIDGET_0 ___, <p>___WIDGET_0___</p>
+    const tolerant = new RegExp(
+      '(?:<p[^>]*>\\s*)?(?:\\\\?_){2,}\\s*WIDGET\\s*(?:\\\\?_)*\\s*' + i + '\\s*(?:\\\\?_){2,}(?:\\s*</p>)?'
+    );
+    if (tolerant.test(restored)) {
+      restored = restored.replace(tolerant, widget);
+      // clean any duplicates of the same index
+      restored = restored.replace(new RegExp('(?:\\\\?_){2,}\\s*WIDGET\\s*(?:\\\\?_)*\\s*' + i + '\\s*(?:\\\\?_){2,}', 'g'), '');
+      console.warn(`  ⚠ Widget ${i}: restored via tolerant match`);
+      return;
+    }
+
+    // 3) anchor recovery: re-insert right after the heading it originally followed
+    if (w.anchor && restored.includes(w.anchor)) {
+      restored = restored.replace(w.anchor, w.anchor + '\n' + widget);
+      warnings.push(`Widget ${i} placeholder was lost by the model — re-inserted after its original heading. Please verify its position.`);
+      console.warn(`  ⚠ Widget ${i}: recovered via heading anchor`);
+      return;
+    }
+
+    // 4) last resort: append + loud warning
+    restored += '\n' + widget;
+    warnings.push(`Widget ${i} could not be repositioned — appended at the end of the blog. Please move it back manually.`);
+    console.warn(`  ⚠ Widget ${i}: appended at end`);
   });
-  return restored;
+
+  return { restored, warnings };
+}
+
+// ════════════════════════════════════════════
+// WEBFLOW LIST NORMALIZER (server-side guarantee)
+// Fixes: editor-created lists nested in <div>/<p> wrappers (Webflow drops
+// these silently) and missing role attributes.
+// ════════════════════════════════════════════
+function normalizeListsForWebflow(html) {
+  let out = html;
+
+  // unwrap <div>...<ul>...</ul>...</div> → hoist lists out of div wrappers
+  // (handles execCommand's mixed-children divs, the #1 cause of vanishing bullets)
+  let prev;
+  do {
+    prev = out;
+    out = out.replace(/<div[^>]*>([^<]*(?:<(?!div|\/div|ul|ol)[^>]*>[^<]*<\/[^>]+>[^<]*)*)<(ul|ol)([^>]*)>([\s\S]*?)<\/\2>([\s\S]*?)<\/div>/gi,
+      (m, before, tag, attrs, inner, after) => {
+        const b = before.trim() ? `<p>${before.trim()}</p>` : '';
+        const a = after.trim() ? `<p>${after.trim()}</p>` : '';
+        return `${b}<${tag}${attrs}>${inner}</${tag}>${a}`;
+      });
+  } while (out !== prev);
+
+  // unwrap <p> directly wrapping a list
+  out = out.replace(/<p[^>]*>\s*(<(?:ul|ol)[^>]*>[\s\S]*?<\/(?:ul|ol)>)\s*<\/p>/gi, '$1');
+
+  // role attributes (Webflow rich text requirement)
+  out = out.replace(/<ul(?![^>]*\brole=)([^>]*)>/gi, '<ul role="list"$1>');
+  out = out.replace(/<ol(?![^>]*\brole=)([^>]*)>/gi, '<ol role="list"$1>');
+  out = out.replace(/<li(?![^>]*\brole=)([^>]*)>/gi, '<li role="listitem"$1>');
+
+  return out;
+}
+
+// ════════════════════════════════════════════
+// FABLE AUDIT — native web search, replaces query-gen + Brave/Google stages
+// ════════════════════════════════════════════
+async function fableAudit({ anthropicKey, title, blogContent, brandHints, gscKeywords, modelMode }) {
+  const auditModel = modelMode === 'sonnet' ? 'claude-sonnet-4-6' : 'claude-fable-5';
+
+  const brandBlock = brandHints?.length
+    ? `\nBRAND DISAMBIGUATION:\n${brandHints.join('\n')}\nOnly research the CORRECT product/brand.`
+    : '';
+  const gscBlock = gscKeywords?.length
+    ? `\nGSC KEYWORDS the blog should cover (check which are missing):\n${gscKeywords.map(k => `- "${k.keyword}" (Pos ${k.position}, ${k.clicks} clicks)`).join('\n')}`
+    : '';
+
+  const res = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': anthropicKey,
+      'anthropic-version': '2023-06-01'
+    },
+    body: JSON.stringify({
+      model: auditModel,
+      max_tokens: 6000,
+      tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 6 }],
+      messages: [{ role: 'user', content: `You are auditing a published SalesRobot blog for factual freshness. Use web search EFFICIENTLY (max 6 targeted searches) — verify by reading official sources (pricing pages, release notes), not aggregator snippets.
+
+TITLE: ${title}
+
+BLOG CONTENT (HTML, widgets replaced by placeholders):
+${blogContent}
+${brandBlock}${gscBlock}
+
+SALESROBOT SOURCE OF TRUTH (the blog's SalesRobot claims must match this):
+${SALESROBOT_FEATURES}
+
+Audit the blog and return ONLY a JSON object (no markdown fences, no commentary):
+{
+  "findings": [
+    {
+      "type": "fix" | "add" | "salesrobot",
+      "where": "<the heading or section it concerns>",
+      "current": "<the exact outdated text in the blog, quoted verbatim — empty string for additions>",
+      "corrected": "<the corrected/new text to use, written to match the blog's voice>",
+      "reason": "<one line: old vs new value, with source>"
+    }
+  ],
+  "verified": ["<brief list of major claims that checked out — no change needed>"]
+}
+
+RULES:
+- "fix" = outdated stat/price/feature found via web research
+- "add" = missing key info (new PAA-worthy points, GSC keyword gaps) — max 3
+- "salesrobot" = SalesRobot section missing must-have features per the source of truth (voice notes, video messages, AI Appointment Setter, cloud/mobile-API safety)
+- Quote "current" text VERBATIM so it can be found in the HTML
+- If a claim can't be verified either way, leave it alone — do not guess
+- Findings must be surgical. This is a refresh, not a rewrite.` }]
+    })
+  }, 240000, 2);
+
+  if (!res.ok) { const t = await res.text(); throw new Error(`Audit failed ${res.status}: ${t.slice(0, 300)}`); }
+  const data = await res.json();
+  const text = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('\n');
+  const searchesUsed = (data.content || []).filter(b => b.type === 'server_tool_use').length;
+
+  let parsed;
+  try {
+    parsed = JSON.parse(text.replace(/```json\n?|```\n?/g, '').trim());
+  } catch {
+    const m = text.match(/\{[\s\S]*\}/);
+    parsed = m ? JSON.parse(m[0]) : { findings: [], verified: [] };
+  }
+  return { ...parsed, searchesUsed, usage: data.usage };
 }
 
 // ════════════════════════════════════════════
@@ -387,6 +535,11 @@ app.patch('/api/webflow', async (req, res) => {
     const { fieldData } = req.body;
     if (!token || !collectionId || !itemId || !fieldData) return res.status(400).json({ error: 'Missing fields' });
 
+    // server-side guarantee: lists always Webflow-safe regardless of frontend state
+    if (fieldData && fieldData['post-body']) {
+      fieldData['post-body'] = normalizeListsForWebflow(fieldData['post-body']);
+    }
+
     const url = `https://api.webflow.com/v2/collections/${collectionId}/items/${itemId}`;
     const response = await fetchWithTimeout(url, {
       method: 'PATCH',
@@ -501,178 +654,69 @@ app.post('/api/smartcheck', async (req, res) => {
       console.log(`    Widget ${i}: ${preview}...`);
     });
 
-    // ── 1. Generate search queries ──
-    console.log('=== Stage 1: Query Gen ===');
+    // ── 1. Fable audit (native web search) ──
+    console.log('=== Stage 1: Fable Audit ===');
+    const modelMode = req.body.modelMode || 'hybrid'; // 'hybrid' | 'fable' | 'sonnet'
+    const audit = await fableAudit({
+      anthropicKey, title,
+      blogContent: protectedContent,
+      brandHints, gscKeywords, modelMode
+    });
+    searchCount = audit.searchesUsed || 0;
+    console.log(`  ${audit.findings?.length || 0} findings, ${searchCount} searches`);
 
-    let brandQueryHint = '';
-    if (brandHints && brandHints.length > 0) {
-      brandQueryHint = `\n\nIMPORTANT CONTEXT:\n${brandHints.join('\n')}\nMake sure search queries target the CORRECT product/brand. For example, if the blog is about Copilot.ai (sales tool), search for "copilot.ai pricing" NOT "microsoft copilot pricing".`;
-    }
+    // ── 2. Rewrite from audit findings ──
+    console.log('=== Stage 2: Rewrite ===');
+    const rewriteModel = modelMode === 'fable' ? 'claude-fable-5' : 'claude-sonnet-4-6';
 
-    const qRes = await Promise.race([
-      anthropic.messages.create({
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 2000,
-        messages: [{ role: 'user', content: `Generate 6-8 search queries to fact-check: "${title}"
-
-BLOG EXCERPT:
-${protectedContent.substring(0, 4000)}
-${brandQueryHint}
-
-Return ONLY a JSON array of strings. Focus on:
-- Official pricing pages (site:company.com pricing)
-- Product feature updates (product 2025 features)
-- Stats and claims verification
-- Competitor info mentioned
-Include year 2025/2026 for latest info.` }]
-      }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('Query generation timeout')), 30000))
-    ]);
-
-    let queries = [];
-    try {
-      const raw = qRes.content[0].text.replace(/```json\n?|```\n?/g, '').trim();
-      queries = JSON.parse(raw);
-    } catch {
-      const m = qRes.content[0].text.match(/\[[\s\S]*?\]/);
-      queries = m ? JSON.parse(m[0]) : [];
-    }
-    console.log(`  ${queries.length} queries generated`);
-
-    // ── 2. Run searches ──
-    console.log('=== Stage 2: Search ===');
-    let allResults = [];
-    const batchSize = 3;
-    for (let i = 0; i < queries.length && i < 8; i += batchSize) {
-      const batch = queries.slice(i, i + batchSize);
-      const batchResults = await Promise.all(
-        batch.map(async q => {
-          const [b, g] = await Promise.all([
-            braveSearch(q, braveKey, 3),
-            googleSearch(q, googleKey, googleCx, 3)
-          ]);
-          searchCount++;
-          return { query: q, results: [...b, ...g] };
-        })
-      );
-      allResults.push(...batchResults);
-      if (i + batchSize < Math.min(queries.length, 8)) {
-        await new Promise(r => setTimeout(r, 500));
-      }
-    }
-
-    const seen = new Set();
-    const unique = [];
-    for (const grp of allResults) {
-      for (const r of grp.results) {
-        if (!seen.has(r.url)) { seen.add(r.url); unique.push({ ...r, query: grp.query }); }
-      }
-    }
-    console.log(`  ${unique.length} unique results from ${searchCount} searches`);
-
-    // ── 3. Claude rewrite ──
-    console.log('=== Stage 3: Rewrite ===');
-
-    const research = unique.map(r =>
-      `[${r.source?.toUpperCase()}] ${r.title}\nURL: ${r.url}\n${r.snippet}`
+    const findingsBlock = (audit.findings || []).map((f, i) =>
+      `${i + 1}. [${f.type.toUpperCase()}] in "${f.where}"
+   FIND: ${f.current || '(addition — no existing text)'}
+   ${f.current ? 'REPLACE WITH' : 'INSERT'}: ${f.corrected}
+   WHY: ${f.reason}`
     ).join('\n\n');
-
-    // ── GSC block ──
-    let gscBlock = '';
-    if (gscKeywords?.length > 0) {
-      gscBlock = `
-
-GSC KEYWORDS TO INTEGRATE:
-${gscKeywords.map(k => `- "${k.keyword}" (Pos ${k.position}, ${k.clicks} clicks)`).join('\n')}
-
-GSC RULES:
-- Work keywords into EXISTING H2/H3 headings where natural
-- Add a short paragraph for keywords with no existing coverage
-- For question keywords (who/what/how/why/is/can/does), add an FAQ at bottom
-- Do NOT keyword-stuff`;
-    }
-
-    // ── Brand disambiguation block ──
-    let brandBlock = '';
-    if (brandHints && brandHints.length > 0) {
-      brandBlock = `
-
-CRITICAL — BRAND DISAMBIGUATION:
-${brandHints.join('\n')}
-READ THE ENTIRE BLOG FIRST to understand which product is being discussed. Only use research results that match the correct brand/product. Discard any search results about the wrong product.`;
-    }
 
     // ── TL;DR instruction ──
     let tldrTopInstruction = '';
     let tldrRule = '';
     if (addTldr) {
       tldrTopInstruction = `
-CRITICAL FIRST TASK: This blog has NO TL;DR summary. You MUST add one at the very beginning of your output (before any other content). Use this exact format:
+CRITICAL FIRST TASK: This blog has NO TL;DR summary. Add one at the very beginning of your output:
 <div class="tldr-box"><p><strong>TL;DR:</strong> [2-3 sentence summary of key takeaways. Be specific and actionable.]</p></div>
 
 `;
       tldrRule = `
-16. ADD a TL;DR box at the VERY TOP of the output using: <div class="tldr-box"><p><strong>TL;DR:</strong> [summary]</p></div>`;
+14. ADD a TL;DR box at the VERY TOP using: <div class="tldr-box"><p><strong>TL;DR:</strong> [summary]</p></div>`;
     }
-
-    // ── SalesRobot features block ──
-    // Detect if this blog mentions SalesRobot so we only inject when relevant
-    const blogMentionsSalesRobot = /salesrobot/i.test(blogContent) || /salesrobot/i.test(title);
-    const salesrobotBlock = blogMentionsSalesRobot ? `
-
-SALESROBOT FEATURES — SOURCE OF TRUTH:
-${SALESROBOT_FEATURES}
-
-SALESROBOT COMPLETENESS RULES (apply whenever the blog has a SalesRobot section):
-- READ the current SalesRobot section in the blog carefully.
-- COMPARE it against the feature list above.
-- ALWAYS add these features if missing — they are ALWAYS relevant for any LinkedIn tool review or alternatives blog:
-  * AI-personalized voice notes on LinkedIn (40%+ reply rates) — this is a key differentiator
-  * AI-personalized video messages on LinkedIn — clone yourself, send personalized videos at scale
-  * AI Appointment Setter — AI that replies to leads and books meetings on autopilot, no other tool does this
-  * Cloud-based with LinkedIn mobile app APIs (not a Chrome extension) — near-zero ban risk
-- Also add if missing and relevant: multichannel LinkedIn + email sequences, unified inbox, Smart Reply Detection, pricing
-- Do NOT dump the entire feature list — focus on the above must-haves plus what's relevant to the blog topic.
-- Keep SalesRobot's tone positive but honest. Do not oversell.
-- If the blog has a comparison table that includes SalesRobot, make sure SalesRobot's row/column reflects its actual capabilities — especially voice notes, video messages, and AI Appointment Setter.
-- NEVER remove existing SalesRobot content — only add to it or correct it.` : '';
-
-    // SalesRobot top instruction — placed BEFORE blog HTML so Claude reads it first
-    const salesrobotTopInstruction = blogMentionsSalesRobot
-      ? `\nSTEP 1 — SALESROBOT SECTION UPDATE (do this FIRST, before anything else):\nFind every SalesRobot section in this blog. For EACH one:\n- Check if AI voice notes are mentioned. If NOT → add a sentence: "SalesRobot lets you send AI-personalized voice notes on LinkedIn — users consistently report 40%+ reply rates, a feature no other LinkedIn automation tool offers."\n- Check if AI video messages are mentioned. If NOT → add a sentence: "You can also send AI-personalized video messages on LinkedIn, cloning yourself to send a unique video to each prospect at scale."\n- Check if AI Appointment Setter is mentioned. If NOT → add a sentence: "SalesRobot's AI Appointment Setter replies to leads on your behalf instantly and nurtures them until they book a meeting — no other LinkedIn tool does this natively."\n- Check if cloud-based / mobile API safety is mentioned. If NOT → add: "Unlike browser extensions like Expandi or Waalaxy, SalesRobot runs entirely in the cloud using LinkedIn mobile app APIs, making it the safest option with near-zero ban risk."\nThese additions are REQUIRED. The blog is incomplete without them.\n\nSTEP 2 — then do the rest of the rewrite as instructed below.\n`
-      : '';
 
     const rwRes = await Promise.race([
       anthropic.messages.create({
-        model: 'claude-sonnet-4-20250514',
+        model: rewriteModel,
         max_tokens: 32000,
-        messages: [{ role: 'user', content: `You are an expert blog content updater for SalesRobot, a LinkedIn and email outreach automation tool. Rewrite this blog using the research below.
-${tldrTopInstruction}${salesrobotTopInstruction}
+        messages: [{ role: 'user', content: `You are a careful HTML editor for SalesRobot's blog. Apply ONLY the verified findings below to this blog. You are a typist executing verified edits — do not research, do not improvise, do not rewrite anything not listed.
+${tldrTopInstruction}
 TITLE: ${title}
 
 CURRENT HTML:
 ${protectedContent}
 
-RESEARCH:
-${research}
-${gscBlock}${brandBlock}${salesrobotBlock}
+VERIFIED FINDINGS TO APPLY (from a web-research audit):
+${findingsBlock || '(no findings — return the HTML with only formatting rules applied)'}
 
 ABSOLUTE RULES — violating any is a failure:
 1. Return ONLY the updated HTML. No markdown fences. No explanation.
-2. PRESERVE every HTML tag, class, id, data attribute EXACTLY as-is unless fixing a fact OR adding missing SalesRobot features per the CRITICAL SALESROBOT TASK above.
-3. PRESERVE all heading levels (h1-h6). Only change heading TEXT for GSC keywords or factual fixes.
-4. PRESERVE every <ul>, <ol>, <li> with ALL attributes (role, class, style, etc).
-5. PRESERVE every <strong>, <em>, <b>, <i> tag.
-6. PRESERVE every <a> with href, target, rel attributes.
-7. PRESERVE every <img> with src, alt, loading, width, height, class, style attributes.
-8. PRESERVE every placeholder like ___WIDGET_0___, ___WIDGET_1___ etc.
-9. Fix outdated facts (pricing, features, stats) using research data. If research conflicts with the blog, prefer the most recent official source.
-10. New lists MUST use: <ul role="list"><li role="listitem">text</li></ul>
-11. New bold = <strong>, new italic = <em>. Never markdown.
-12. Use active voice. Remove em-dashes. Use contractions where natural.
-13. NEVER strip attributes from any existing element.
-14. NEVER convert HTML to markdown.
-15. DO NOT remove or modify any ___WIDGET_N___ markers.${tldrRule}${blogMentionsSalesRobot ? "\n16. MANDATORY: Add voice notes, video messages, AI Appointment Setter, and cloud-based API safety to every SalesRobot section if any are missing." : ""}` }]
+2. Apply each finding exactly: locate the FIND text, replace with the REPLACE text (or insert additions under the named heading). Keep replacement length similar to the original.
+3. Change NOTHING else. Every other sentence stays byte-identical.
+4. PRESERVE every HTML tag, class, id, data attribute EXACTLY as-is.
+5. PRESERVE all heading levels and their attributes. Only heading TEXT may change if a finding targets it.
+6. PRESERVE every <ul>, <ol>, <li> with ALL attributes. New lists MUST use: <ul role="list"><li role="listitem">text</li></ul>
+7. PRESERVE every <a>, <img>, <strong>, <em> with all attributes.
+8. PRESERVE every placeholder like ___WIDGET_0___, ___WIDGET_1___ EXACTLY — never modify, move, escape, or delete them.
+9. New bold = <strong>, new italic = <em>. Never markdown syntax anywhere.
+10. Never convert HTML to markdown.
+11. Never remove existing SalesRobot content — only add or correct per findings.
+12. Use active voice in new text. Use contractions where natural.
+13. Insert additions as complete, well-formed HTML blocks (<p>, <ul role="list">) under their target heading.${tldrRule}` }]
       }),
       new Promise((_, reject) => setTimeout(() => reject(new Error('Content rewrite timeout')), 300000))
     ]);
@@ -681,10 +725,14 @@ ABSOLUTE RULES — violating any is a failure:
     if (updated.startsWith('```')) updated = updated.replace(/^```(?:html)?\n?/, '').replace(/\n?```$/, '');
     updated = updated.trim();
 
-    // ── STEP 4: Restore widgets ──
-    console.log('=== Stage 4: Widget Restoration ===');
-    updated = restoreWidgets(updated, widgets);
-    console.log(`  Restored ${widgets.length} widgets`);
+    // ── STEP 3: Restore widgets (tolerant + anchor recovery) ──
+    console.log('=== Stage 3: Widget Restoration ===');
+    const { restored, warnings: widgetWarnings } = restoreWidgets(updated, widgets);
+    updated = restored;
+    console.log(`  Restored ${widgets.length} widgets (${widgetWarnings.length} warnings)`);
+
+    // ── STEP 3.5: Normalize lists for Webflow (server-side guarantee) ──
+    updated = normalizeListsForWebflow(updated);
 
     // ── Content safety check ──
     const stripTags = (h) => h.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
@@ -706,14 +754,21 @@ ABSOLUTE RULES — violating any is a failure:
 
     const result = {
       updatedContent: updated,
+      changelog: (audit.findings || []).map(f => ({
+        type: f.type, where: f.where, reason: f.reason,
+        from: f.current ? f.current.slice(0, 160) : null,
+        to: f.corrected ? f.corrected.slice(0, 160) : null
+      })),
+      verified: audit.verified || [],
+      widgetWarnings,
       stats: {
         searches: searchCount,
-        results: unique.length,
+        findings: audit.findings?.length || 0,
         elapsed,
+        modelMode,
         gscKeywords: gscKeywords?.length || 0,
         widgetsProtected: widgets.length
       },
-      research: unique.slice(0, 15),
       tldrAdded,
       contentWarning
     };
