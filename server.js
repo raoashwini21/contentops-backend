@@ -298,7 +298,8 @@ function normalizeListsForWebflow(html) {
 // FABLE AUDIT — native web search, replaces query-gen + Brave/Google stages
 // ════════════════════════════════════════════
 async function fableAudit({ anthropicKey, title, blogContent, brandHints, gscKeywords, modelMode }) {
-  const auditModel = modelMode === 'sonnet' ? 'claude-sonnet-4-6' : 'claude-fable-5';
+  //const auditModel = modelMode === 'sonnet' ? 'claude-sonnet-4-6' : 'claude-fable-5';
+  const auditModel = modelMode === 'sonnet' ? 'claude-sonnet-4-6' : 'claude-opus-4-8';
 
   const brandBlock = brandHints?.length
     ? `\nBRAND DISAMBIGUATION:\n${brandHints.join('\n')}\nOnly research the CORRECT product/brand.`
@@ -667,7 +668,8 @@ app.post('/api/smartcheck', async (req, res) => {
 
     // ── 2. Rewrite from audit findings ──
     console.log('=== Stage 2: Rewrite ===');
-    const rewriteModel = modelMode === 'fable' ? 'claude-fable-5' : 'claude-sonnet-4-6';
+    //const rewriteModel = modelMode === 'fable' ? 'claude-fable-5' : 'claude-sonnet-4-6';
+    const rewriteModel = modelMode === 'fable' ? 'claude-opus-4-8' : 'claude-sonnet-4-6';
 
     const findingsBlock = (audit.findings || []).map((f, i) =>
       `${i + 1}. [${f.type.toUpperCase()}] in "${f.where}"
