@@ -651,7 +651,7 @@ app.post('/api/smartcheck', async (req, res) => {
     const { protectedHtml: protectedContent, widgets } = protectWidgets(blogContent);
     console.log(`  Protected ${widgets.length} widgets/embeds`);
     widgets.forEach((w, i) => {
-      const preview = w.substring(0, 100).replace(/\n/g, ' ').trim();
+      const preview = w.content.substring(0, 100).replace(/\n/g, ' ').trim();
       console.log(`    Widget ${i}: ${preview}...`);
     });
 
