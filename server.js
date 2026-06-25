@@ -269,28 +269,12 @@ function restoreWidgets(html, widgets) {
 // ════════════════════════════════════════════
 function normalizeListsForWebflow(html) {
   let out = html;
-
-  // unwrap <div>...<ul>...</ul>...</div> → hoist lists out of div wrappers
-  // (handles execCommand's mixed-children divs, the #1 cause of vanishing bullets)
-  let prev;
-  do {
-    prev = out;
-    out = out.replace(/<div[^>]*>([^<]*(?:<(?!div|\/div|ul|ol)[^>]*>[^<]*<\/[^>]+>[^<]*)*)<(ul|ol)([^>]*)>([\s\S]*?)<\/\2>([\s\S]*?)<\/div>/gi,
-      (m, before, tag, attrs, inner, after) => {
-        const b = before.trim() ? `<p>${before.trim()}</p>` : '';
-        const a = after.trim() ? `<p>${after.trim()}</p>` : '';
-        return `${b}<${tag}${attrs}>${inner}</${tag}>${a}`;
-      });
-  } while (out !== prev);
-
-  // unwrap <p> directly wrapping a list
-  out = out.replace(/<p[^>]*>\s*(<(?:ul|ol)[^>]*>[\s\S]*?<\/(?:ul|ol)>)\s*<\/p>/gi, '$1');
-
-  // role attributes (Webflow rich text requirement)
+  // ONLY add role attributes — surgical, zero structural changes.
+  // The previous div/p unwrapping regexes used [\s\S]*? which matched across
+  // hundreds of lines and broke video embeds and other widgets. Removed permanently.
   out = out.replace(/<ul(?![^>]*\brole=)([^>]*)>/gi, '<ul role="list"$1>');
   out = out.replace(/<ol(?![^>]*\brole=)([^>]*)>/gi, '<ol role="list"$1>');
   out = out.replace(/<li(?![^>]*\brole=)([^>]*)>/gi, '<li role="listitem"$1>');
-
   return out;
 }
 
