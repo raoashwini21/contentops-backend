@@ -103,21 +103,39 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 30000, retries = 
 
 async function fetchAllBlogs(collectionId, token) {
   console.log('Fetching blogs from Webflow...');
-  const items = [];
-  let offset = 0;
-  while (true) {
+
+  // Fetch first page to learn the total, then fetch remaining pages in parallel.
+  const firstUrl = `https://api.webflow.com/v2/collections/${collectionId}/items?limit=100&offset=0`;
+  const firstRes = await fetchWithTimeout(firstUrl, {
+    headers: { 'Authorization': `Bearer ${token}`, 'accept': 'application/json' }
+  }, 20000, 3);
+  if (!firstRes.ok) { const t = await firstRes.text(); throw new Error(`Webflow ${firstRes.status}: ${t}`); }
+  const firstData = await firstRes.json();
+  const total = firstData.pagination?.total ?? firstData.items?.length ?? 0;
+  const items = [...(firstData.items || [])];
+
+  // build remaining page offsets and fetch them concurrently (cap concurrency at 4)
+  const offsets = [];
+  for (let o = 100; o < total; o += 100) offsets.push(o);
+
+  const fetchPage = async (offset) => {
     const url = `https://api.webflow.com/v2/collections/${collectionId}/items?limit=100&offset=${offset}`;
-    const res = await fetchWithTimeout(url, {
+    const r = await fetchWithTimeout(url, {
       headers: { 'Authorization': `Bearer ${token}`, 'accept': 'application/json' }
-    }, 30000, 3);
-    if (!res.ok) { const errorText = await res.text(); throw new Error(`Webflow ${res.status}: ${errorText}`); }
-    const data = await res.json();
-    const batch = data.items || [];
-    items.push(...batch);
-    if (batch.length < 100) break;
-    offset += 100;
-    await new Promise(r => setTimeout(r, 300));
+    }, 20000, 3);
+    if (!r.ok) { const t = await r.text(); throw new Error(`Webflow ${r.status}: ${t}`); }
+    const d = await r.json();
+    return d.items || [];
+  };
+
+  // run in small concurrent batches to stay under Webflow rate limits
+  const CONCURRENCY = 4;
+  for (let i = 0; i < offsets.length; i += CONCURRENCY) {
+    const batch = offsets.slice(i, i + CONCURRENCY);
+    const results = await Promise.all(batch.map(fetchPage));
+    results.forEach(arr => items.push(...arr));
   }
+
   const seen = new Set();
   return items.filter(i => { if (seen.has(i.id)) return false; seen.add(i.id); return true; });
 }
@@ -279,6 +297,36 @@ function normalizeListsForWebflow(html) {
 }
 
 // ════════════════════════════════════════════
+// INLINE TAG BALANCER (server-side guarantee)
+// Fixes the "everything turns bold after a point" bug: a single unclosed
+// <strong>/<em>/<b>/<i> makes the browser bold/italicize the rest of the page.
+// We balance these inline tags PER BLOCK (inside each <p>, <li>, <hN>) so a
+// stray open tag can never bleed past its own paragraph.
+// ════════════════════════════════════════════
+function balanceInlineTags(html) {
+  const inlineTags = ['strong', 'em', 'b', 'i', 'u'];
+
+  // Operate within each block-level element so fixes stay local.
+  return html.replace(/<(p|li|h[1-6]|td|th|blockquote)(\s[^>]*)?>([\s\S]*?)<\/\1>/gi,
+    (full, tag, attrs, inner) => {
+      let fixed = inner;
+      for (const t of inlineTags) {
+        const opens = (fixed.match(new RegExp(`<${t}(?:\\s[^>]*)?>`, 'gi')) || []).length;
+        const closes = (fixed.match(new RegExp(`</${t}>`, 'gi')) || []).length;
+        if (opens > closes) {
+          // append the missing close tags at the end of this block
+          fixed += `</${t}>`.repeat(opens - closes);
+        } else if (closes > opens) {
+          // strip stray closing tags that have no matching open (they'd leak too)
+          let extra = closes - opens;
+          fixed = fixed.replace(new RegExp(`</${t}>`, 'gi'), (m) => (extra-- > 0 ? '' : m));
+        }
+      }
+      return `<${tag}${attrs || ''}>${fixed}</${tag}>`;
+    });
+}
+
+// ════════════════════════════════════════════
 // FABLE AUDIT — native web search, replaces query-gen + Brave/Google stages
 // ════════════════════════════════════════════
 async function fableAudit({ anthropicKey, title, blogContent, brandHints, gscKeywords, modelMode }) {
@@ -333,6 +381,7 @@ RULES:
 - "add" = missing key info (new PAA-worthy points, GSC keyword gaps) — max 3
 - "salesrobot" = SalesRobot section missing must-have features per the source of truth (voice notes, video messages, AI Appointment Setter, cloud/mobile-API safety)
 - Quote "current" text VERBATIM so it can be found in the HTML
+- For an "add" that is a FAQ question, format "corrected" as "Q: <question> A: <answer>" so it renders as a proper Q&A
 - If a claim can't be verified either way, leave it alone — do not guess
 - Findings must be surgical. This is a refresh, not a rewrite.` }]
     })
@@ -522,7 +571,7 @@ app.patch('/api/webflow', async (req, res) => {
 
     // server-side guarantee: lists always Webflow-safe regardless of frontend state
     if (fieldData && fieldData['post-body']) {
-      fieldData['post-body'] = normalizeListsForWebflow(fieldData['post-body']);
+      fieldData['post-body'] = balanceInlineTags(normalizeListsForWebflow(fieldData['post-body']));
     }
 
     const url = `https://api.webflow.com/v2/collections/${collectionId}/items/${itemId}`;
@@ -652,64 +701,117 @@ app.post('/api/smartcheck', async (req, res) => {
 
     // ── 2. Rewrite from audit findings ──
     console.log('=== Stage 2: Rewrite ===');
-    //const rewriteModel = modelMode === 'fable' ? 'claude-fable-5' : 'claude-sonnet-4-6';
-    const rewriteModel = modelMode === 'fable' ? 'claude-opus-4-8' : 'claude-sonnet-4-6';
+    // ════════════════════════════════════════════
+    // CODE-BASED EDIT APPLICATION (no second LLM call)
+    //
+    // The audit already told us exactly what to change (findings with
+    // verbatim `current` → `corrected` text). We apply those edits in code
+    // with exact string matching. The model NEVER regenerates the document,
+    // so it is mechanically impossible to drop a paragraph, fumble a tag,
+    // or emit a stray `<`. Every byte not named in a finding stays identical.
+    // ════════════════════════════════════════════
+    console.log('=== Stage 2: Applying edits (code, no LLM rewrite) ===');
 
-    const findingsBlock = (audit.findings || []).map((f, i) =>
-      `${i + 1}. [${f.type.toUpperCase()}] in "${f.where}"
-   FIND: ${f.current || '(addition — no existing text)'}
-   ${f.current ? 'REPLACE WITH' : 'INSERT'}: ${f.corrected}
-   WHY: ${f.reason}`
-    ).join('\n\n');
+    let updated = protectedContent;
+    const applied = [];
+    const skipped = [];
 
-    // ── TL;DR instruction ──
-    let tldrTopInstruction = '';
-    let tldrRule = '';
-    if (addTldr) {
-      tldrTopInstruction = `
-CRITICAL FIRST TASK: This blog has NO TL;DR summary. Add one at the very beginning of your output:
-<div class="tldr-box"><p><strong>TL;DR:</strong> [2-3 sentence summary of key takeaways. Be specific and actionable.]</p></div>
+    // Find the exact substring in `hay` matching `needle`, tolerant to
+    // curly-vs-straight quotes and whitespace differences. Returns the exact
+    // original substring so we only ever replace bytes that truly exist.
+    function findTolerant(hay, needle) {
+      if (!needle) return null;
+      if (hay.includes(needle)) return needle; // exact fast path
 
-`;
-      tldrRule = `
-14. ADD a TL;DR box at the VERY TOP using: <div class="tldr-box"><p><strong>TL;DR:</strong> [summary]</p></div>`;
+      // Build a regex from the needle: escape regex chars, allow any quote
+      // style for apostrophes/quotes, and allow flexible whitespace.
+      const pattern = needle
+        .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')   // escape regex metachars
+        .replace(/['\u2018\u2019]/g, "['\u2018\u2019]") // any apostrophe
+        .replace(/["\u201C\u201D]/g, '["\u201C\u201D]') // any quote
+        .replace(/\s+/g, '\\s+');                  // flexible whitespace
+      try {
+        const m = new RegExp(pattern).exec(hay);
+        return m ? m[0] : null;
+      } catch {
+        return null;
+      }
     }
 
-    const rwRes = await Promise.race([
-      anthropic.messages.create({
-        model: rewriteModel,
-        max_tokens: 32000,
-        messages: [{ role: 'user', content: `You are a careful HTML editor for SalesRobot's blog. Apply ONLY the verified findings below to this blog. You are a typist executing verified edits — do not research, do not improvise, do not rewrite anything not listed.
-${tldrTopInstruction}
-TITLE: ${title}
+    for (const f of (audit.findings || [])) {
+      const corrected = (f.corrected || '').trim();
 
-CURRENT HTML:
-${protectedContent}
+      if (f.type === 'add' || !f.current) {
+        // ADDITION — format based on what's being added, then insert after the matching heading.
+        if (!corrected) { skipped.push({ ...f, why: 'empty corrected text' }); continue; }
 
-VERIFIED FINDINGS TO APPLY (from a web-research audit):
-${findingsBlock || '(no findings — return the HTML with only formatting rules applied)'}
+        let block;
+        if (/^\s*</.test(corrected)) {
+          // already HTML — trust it as-is
+          block = corrected;
+        } else if (f.question || /^\s*q\s*[:.]/i.test(corrected) || (f.where || '').toLowerCase().includes('faq')) {
+          // FAQ Q+A pair → bold question heading + answer paragraph (matches FAQ styling)
+          let q = f.question || '';
+          let a = corrected;
+          // only split on "Q: ... A: ..." when both markers are present at clause boundaries
+          const qa = corrected.match(/^\s*q\s*[:.]\s*([\s\S]+?)\s+a\s*[:.]\s*([\s\S]+)$/i);
+          if (qa) { q = qa[1].trim(); a = qa[2].trim(); }
+          if (q) {
+            block = `<h3>${q}</h3>\n<p>${a}</p>`;
+          } else {
+            block = `<p>${a}</p>`;
+          }
+        } else if (/\n\s*[-*•]\s+/.test(corrected) || /;\s+\S/.test(corrected)) {
+          // looks like a list → render as a proper Webflow list
+          const items = corrected.split(/\n\s*[-*•]\s+|;\s+/).map(s => s.trim().replace(/^and\s+/i, '')).filter(Boolean);
+          block = items.length > 1
+            ? `<ul role="list">\n${items.map(it => `<li role="listitem">${it}</li>`).join('\n')}\n</ul>`
+            : `<p>${corrected}</p>`;
+        } else {
+          // plain new sentence/paragraph
+          block = `<p>${corrected}</p>`;
+        }
 
-ABSOLUTE RULES — violating any is a failure:
-1. Return ONLY the updated HTML. No markdown fences. No explanation.
-2. Apply each finding exactly: locate the FIND text, replace with the REPLACE text (or insert additions under the named heading). Keep replacement length similar to the original.
-3. Change NOTHING else. Every other sentence stays byte-identical.
-4. PRESERVE every HTML tag, class, id, data attribute EXACTLY as-is.
-5. PRESERVE all heading levels and their attributes. Only heading TEXT may change if a finding targets it.
-6. PRESERVE every <ul>, <ol>, <li> with ALL attributes. New lists MUST use: <ul role="list"><li role="listitem">text</li></ul>
-7. PRESERVE every <a>, <img>, <strong>, <em> with all attributes.
-8. PRESERVE every placeholder like ___WIDGET_0___, ___WIDGET_1___ EXACTLY — never modify, move, escape, or delete them.
-9. New bold = <strong>, new italic = <em>. Never markdown syntax anywhere.
-10. Never convert HTML to markdown.
-11. Never remove existing SalesRobot content — only add or correct per findings.
-12. Use active voice in new text. Use contractions where natural.
-13. Insert additions as complete, well-formed HTML blocks (<p>, <ul role="list">) under their target heading.${tldrRule}` }]
-      }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('Content rewrite timeout')), 300000))
-    ]);
+        // locate the target heading by its text
+        const where = (f.where || '').trim();
+        let inserted = false;
+        if (where) {
+          const hRe = new RegExp(`(<h[1-6][^>]*>[^<]*${where.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').slice(0, 40)}[^<]*</h[1-6]>)`, 'i');
+          const hm = hRe.exec(updated);
+          if (hm) {
+            updated = updated.slice(0, hm.index + hm[0].length) + '\n' + block + updated.slice(hm.index + hm[0].length);
+            inserted = true;
+          }
+        }
+        if (!inserted) { skipped.push({ ...f, why: 'heading for addition not found' }); continue; }
+        applied.push(f);
+        continue;
+      }
 
-    let updated = rwRes.content[0].text;
-    if (updated.startsWith('```')) updated = updated.replace(/^```(?:html)?\n?/, '').replace(/\n?```$/, '');
-    updated = updated.trim();
+      // FIX / SALESROBOT — exact replace of verbatim `current` text.
+      const target = findTolerant(updated, f.current);
+      if (target && updated.includes(target)) {
+        updated = updated.replace(target, corrected);
+        applied.push(f);
+      } else {
+        skipped.push({ ...f, why: 'find text not located verbatim' });
+      }
+    }
+
+    console.log(`  Applied ${applied.length}/${(audit.findings || []).length} findings (${skipped.length} skipped)`);
+
+    // ── TL;DR insertion (code-based) ──
+    let tldrAddedFlag = false;
+    if (addTldr && !/tl;?dr/i.test(updated)) {
+      // build a short TL;DR from the applied findings' corrected lines
+      const points = applied.filter(f => f.type !== 'add').slice(0, 3).map(f => f.reason).filter(Boolean);
+      const summary = points.length
+        ? points.join(' ')
+        : 'Key facts in this guide were verified and updated for accuracy in 2026.';
+      const tldr = `<div class="tldr-box"><p><strong>TL;DR:</strong> ${summary}</p></div>\n`;
+      updated = tldr + updated;
+      tldrAddedFlag = true;
+    }
 
     // ── STEP 3: Restore widgets (tolerant + anchor recovery) ──
     console.log('=== Stage 3: Widget Restoration ===');
@@ -718,7 +820,7 @@ ABSOLUTE RULES — violating any is a failure:
     console.log(`  Restored ${widgets.length} widgets (${widgetWarnings.length} warnings)`);
 
     // ── STEP 3.5: Normalize lists for Webflow (server-side guarantee) ──
-    updated = normalizeListsForWebflow(updated);
+    updated = balanceInlineTags(normalizeListsForWebflow(updated));
 
     // ── Content safety check ──
     const stripTags = (h) => h.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
@@ -733,23 +835,29 @@ ABSOLUTE RULES — violating any is a failure:
       console.warn(`  ⚠ ${contentWarning}`);
     }
 
-    const tldrAdded = addTldr && (updated.toLowerCase().includes('tl;dr') || updated.includes('tldr-box'));
+    const tldrAdded = tldrAddedFlag || (addTldr && /tldr-box/.test(updated));
 
     const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
     console.log(`Done in ${elapsed}s`);
 
     const result = {
       updatedContent: updated,
-      changelog: (audit.findings || []).map(f => ({
+      changelog: applied.map(f => ({
         type: f.type, where: f.where, reason: f.reason,
         from: f.current ? f.current.slice(0, 160) : null,
         to: f.corrected ? f.corrected.slice(0, 160) : null
+      })),
+      skipped: skipped.map(f => ({
+        type: f.type, where: f.where, reason: f.reason,
+        why: f.why, from: f.current ? f.current.slice(0, 160) : null
       })),
       verified: audit.verified || [],
       widgetWarnings,
       stats: {
         searches: searchCount,
         findings: audit.findings?.length || 0,
+        applied: applied.length,
+        skipped: skipped.length,
         elapsed,
         modelMode,
         gscKeywords: gscKeywords?.length || 0,
