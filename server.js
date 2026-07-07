@@ -231,7 +231,20 @@ function protectWidgets(html) {
     return { content, anchor };
   });
 
-  return { protectedHtml, widgets: anchored };
+  // detect PRE-EXISTING duplicate widgets in the source (leftover from prior
+  // damage: e.g. the same video appearing twice). Surfaced, not auto-deleted.
+  const sourceWarnings = [];
+  const seenWidget = new Map();
+  anchored.forEach((w, i) => {
+    const key = w.content.replace(/\s+/g, ' ').trim();
+    if (seenWidget.has(key)) {
+      sourceWarnings.push(`Widgets ${seenWidget.get(key)} and ${i} are IDENTICAL (duplicate embed already in the source — likely leftover damage from an earlier run). Review the live blog and remove one copy.`);
+    } else {
+      seenWidget.set(key, i);
+    }
+  });
+
+  return { protectedHtml, widgets: anchored, sourceWarnings };
 }
 
 function restoreWidgets(html, widgets) {
@@ -682,7 +695,7 @@ app.post('/api/smartcheck', async (req, res) => {
 
     // ── STEP 0: Protect widgets/embeds ──
     console.log('=== Stage 0: Widget Protection ===');
-    const { protectedHtml: protectedContent, widgets } = protectWidgets(blogContent);
+    const { protectedHtml: protectedContent, widgets, sourceWarnings } = protectWidgets(blogContent);
     console.log(`  Protected ${widgets.length} widgets/embeds`);
     widgets.forEach((w, i) => {
       const preview = w.content.substring(0, 100).replace(/\n/g, ' ').trim();
@@ -716,6 +729,20 @@ app.post('/api/smartcheck', async (req, res) => {
     let updated = protectedContent;
     const applied = [];
     const skipped = [];
+
+    // integrity helpers: no mutation may change the set of widget placeholders
+    const phCount = (s) => (s.match(/___WIDGET_\d+___/g) || []).length;
+    const totalPh = phCount(updated);
+    const applyGuarded = (mutate, f, label) => {
+      const before = updated;
+      updated = mutate(updated);
+      if (phCount(updated) !== totalPh) {
+        updated = before; // instant rollback — placeholder set must never change
+        skipped.push({ ...f, why: `${label} would alter a protected widget — apply manually` });
+        return false;
+      }
+      return true;
+    };
 
     // Find the exact substring in `hay` matching `needle`, tolerant to
     // curly-vs-straight quotes and whitespace differences. Returns the exact
@@ -780,8 +807,11 @@ app.post('/api/smartcheck', async (req, res) => {
           const hRe = new RegExp(`(<h[1-6][^>]*>[^<]*${where.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').slice(0, 40)}[^<]*</h[1-6]>)`, 'i');
           const hm = hRe.exec(updated);
           if (hm) {
-            updated = updated.slice(0, hm.index + hm[0].length) + '\n' + block + updated.slice(hm.index + hm[0].length);
-            inserted = true;
+            inserted = applyGuarded(
+              (u) => u.slice(0, hm.index + hm[0].length) + '\n' + block + u.slice(hm.index + hm[0].length),
+              f, 'insertion'
+            );
+            if (!inserted) continue;
           }
         }
         if (!inserted) { skipped.push({ ...f, why: 'heading for addition not found' }); continue; }
@@ -805,12 +835,20 @@ app.post('/api/smartcheck', async (req, res) => {
             continue;
           }
         }
-        updated = updated.replace(target, corrected);
+        if (!applyGuarded((u) => u.replace(target, corrected), f, 'replacement')) continue;
         applied.push(f);
       } else {
         skipped.push({ ...f, why: 'find text not located verbatim' });
       }
     }
+
+    // final sweep: a placeholder must appear exactly once — strip duplicates
+    const seenPh = new Set();
+    updated = updated.replace(/___WIDGET_(\d+)___/g, (m) => {
+      if (seenPh.has(m)) return '';
+      seenPh.add(m);
+      return m;
+    });
 
     console.log(`  Applied ${applied.length}/${(audit.findings || []).length} findings (${skipped.length} skipped)`);
 
@@ -829,7 +867,8 @@ app.post('/api/smartcheck', async (req, res) => {
 
     // ── STEP 3: Restore widgets (tolerant + anchor recovery) ──
     console.log('=== Stage 3: Widget Restoration ===');
-    const { restored, warnings: widgetWarnings } = restoreWidgets(updated, widgets);
+    const { restored, warnings: restoreWarnings } = restoreWidgets(updated, widgets);
+    const widgetWarnings = [...(sourceWarnings || []), ...restoreWarnings];
     updated = restored;
     console.log(`  Restored ${widgets.length} widgets (${widgetWarnings.length} warnings)`);
 
