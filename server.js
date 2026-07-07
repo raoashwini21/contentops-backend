@@ -381,6 +381,7 @@ RULES:
 - "add" = missing key info (new PAA-worthy points, GSC keyword gaps) — max 3
 - "salesrobot" = SalesRobot section missing must-have features per the source of truth (voice notes, video messages, AI Appointment Setter, cloud/mobile-API safety)
 - Quote "current" text VERBATIM so it can be found in the HTML
+- NEVER include ___WIDGET_N___ placeholder tokens inside "current" or "corrected" — those are protected elements. Quote text that stops BEFORE a placeholder or starts AFTER it, never spanning one.
 - For an "add" that is a FAQ question, format "corrected" as "Q: <question> A: <answer>" so it renders as a proper Q&A
 - If a claim can't be verified either way, leave it alone — do not guess
 - Findings must be surgical. This is a refresh, not a rewrite.` }]
@@ -791,6 +792,19 @@ app.post('/api/smartcheck', async (req, res) => {
       // FIX / SALESROBOT — exact replace of verbatim `current` text.
       const target = findTolerant(updated, f.current);
       if (target && updated.includes(target)) {
+        // ── HARD GUARD: an edit must never destroy a widget placeholder. ──
+        // If the matched text contains ___WIDGET_N___ tokens, the replacement
+        // must contain the exact same tokens, or the edit is refused.
+        const phIn = (s) => (String(s).match(/___WIDGET_\d+___/g) || []);
+        const targetPh = phIn(target);
+        if (targetPh.length) {
+          const correctedPh = new Set(phIn(corrected));
+          const allPreserved = targetPh.every(ph => correctedPh.has(ph));
+          if (!allPreserved) {
+            skipped.push({ ...f, why: 'edit spans a protected widget — apply this change manually in the editor' });
+            continue;
+          }
+        }
         updated = updated.replace(target, corrected);
         applied.push(f);
       } else {
