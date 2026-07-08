@@ -404,6 +404,7 @@ Audit the blog and return ONLY a JSON object (no markdown fences, no commentary)
 RULES:
 - "fix" = outdated stat/price/feature found via web research
 - "add" = missing key info (new PAA-worthy points, GSC keyword gaps) — max 3
+- If the blog has NO FAQ section and your research surfaces questions people actually ask about this topic, propose 1-3 FAQ additions: type "add", where: "FAQ", corrected: "Q: <question> A: <40-60 word direct answer>". The section will be created automatically.
 - "salesrobot" = SalesRobot section missing must-have features per the source of truth (voice notes, video messages, AI Appointment Setter, cloud/mobile-API safety)
 - Quote "current" text VERBATIM so it can be found in the HTML
 - NEVER include ___WIDGET_N___ placeholder tokens inside "current" or "corrected" — those are protected elements. Quote text that stops BEFORE a placeholder or starts AFTER it, never spanning one.
@@ -824,6 +825,29 @@ app.post('/api/smartcheck', async (req, res) => {
               f, 'insertion'
             );
             if (!inserted) continue;
+          }
+        }
+        // FAQ fallback: no FAQ heading exists → create the section.
+        // Placed before the conclusion heading if one exists, else appended at the end.
+        if (!inserted && /faq|frequently asked|question/i.test(where)) {
+          // if a previous addition already created the section, reuse it
+          const faqRe = /(<h2[^>]*>[^<]*(?:frequently asked questions|faqs?)[^<]*<\/h2>)/i;
+          const existingFaq = faqRe.exec(updated);
+          if (existingFaq) {
+            inserted = applyGuarded(
+              (u) => u.slice(0, existingFaq.index + existingFaq[0].length) + '\n' + block + u.slice(existingFaq.index + existingFaq[0].length),
+              f, 'insertion'
+            );
+          } else {
+            const section = `<h2>Frequently Asked Questions</h2>\n` + block;
+            const conclRe = /<h2[^>]*>[^<]*(?:conclusion|final thoughts|wrapping up|verdict|putting it)[^<]*<\/h2>/i;
+            const concl = conclRe.exec(updated);
+            inserted = applyGuarded(
+              concl
+                ? (u) => u.slice(0, concl.index) + section + '\n' + u.slice(concl.index)
+                : (u) => u + '\n' + section,
+              f, 'insertion'
+            );
           }
         }
         if (!inserted) { skipped.push({ ...f, why: 'heading for addition not found' }); continue; }
