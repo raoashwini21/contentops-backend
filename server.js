@@ -187,7 +187,13 @@ function protectWidgets(html) {
     /<object[^>]*/gi,
   ];
 
-  const found = [];
+  // Collect ALL candidate ranges first (no filtering during collection),
+  // then keep only non-overlapping ranges, preferring the OUTERMOST when
+  // ranges nest (e.g. <figure> containing an <iframe> = ONE widget, the figure).
+  // The previous check missed containment: a later pattern (figure) fully
+  // containing an earlier match (iframe) slipped through, corrupting replacement
+  // positions — which ate adjacent text and duplicated videos.
+  const candidates = [];
   for (const pattern of patterns) {
     pattern.lastIndex = 0;
     let match;
@@ -196,16 +202,22 @@ function protectWidgets(html) {
       if (!tagMatch) continue;
       const block = extractBlock(html, match.index, tagMatch[1]);
       if (!block) continue;
-      const endIdx = match.index + block.length;
-      const overlaps = found.some(f =>
-        (match.index >= f.start && match.index < f.end) ||
-        (endIdx > f.start && endIdx <= f.end)
-      );
-      if (!overlaps) found.push({ start: match.index, end: endIdx, content: block });
+      candidates.push({ start: match.index, end: match.index + block.length, content: block });
     }
   }
 
-  found.sort((a, b) => a.start - b.start);
+  // sort: by start asc; at equal start, larger range (outermost) first
+  candidates.sort((a, b) => a.start - b.start || b.end - a.end);
+
+  const found = [];
+  let lastEnd = -1;
+  for (const c of candidates) {
+    if (c.start >= lastEnd) {          // no intersection with anything kept
+      found.push(c);
+      lastEnd = c.end;
+    }
+    // else: intersects/nested inside a kept (outermost) range → drop
+  }
 
   let protectedHtml = html;
   let offset = 0;
