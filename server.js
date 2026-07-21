@@ -312,12 +312,13 @@ function restoreWidgets(html, widgets) {
 // ════════════════════════════════════════════
 function normalizeListsForWebflow(html) {
   let out = html;
-  // ONLY add role attributes — surgical, zero structural changes.
-  // The previous div/p unwrapping regexes used [\s\S]*? which matched across
-  // hundreds of lines and broke video embeds and other widgets. Removed permanently.
-  out = out.replace(/<ul(?![^>]*\brole=)([^>]*)>/gi, '<ul role="list"$1>');
-  out = out.replace(/<ol(?![^>]*\brole=)([^>]*)>/gi, '<ol role="list"$1>');
-  out = out.replace(/<li(?![^>]*\brole=)([^>]*)>/gi, '<li role="listitem"$1>');
+  // Webflow-canonical lists: ul/ol/li carry ONLY the role attribute.
+  // Foreign attrs (style/class/dir/data-* from pasted content) make Webflow's
+  // rich text API silently drop the nodes. Tag-level rewrite only — never
+  // touches content between tags, so widgets/structure are untouched.
+  out = out.replace(/<ul\b[^>]*>/gi, '<ul role="list">');
+  out = out.replace(/<ol\b[^>]*>/gi, '<ol role="list">');
+  out = out.replace(/<li\b[^>]*>/gi, '<li role="listitem">');
   return out;
 }
 
@@ -611,7 +612,46 @@ app.patch('/api/webflow', async (req, res) => {
     if (!response.ok) return res.status(response.status).json(data);
     blogCache.delete(collectionId);
     console.log('Published:', itemId);
-    res.json(data);
+
+    // ── POST-PUBLISH VERIFICATION ──
+    // Fetch the item back and confirm Webflow actually STORED what we sent.
+    // Webflow's rich text API silently drops nodes it dislikes — this makes
+    // any loss loud instead of silent, whatever the cause (API, network, sync).
+    let verify = null;
+    if (fieldData['post-body']) {
+      try {
+        const count = (html, re) => (String(html).match(re) || []).length;
+        const sig = (html) => ({
+          ul: count(html, /<ul\b/gi),
+          ol: count(html, /<ol\b/gi),
+          li: count(html, /<li\b/gi),
+          table: count(html, /<table\b/gi),
+          iframe: count(html, /<iframe\b/gi),
+          img: count(html, /<img\b/gi),
+        });
+        const sent = sig(fieldData['post-body']);
+        const vRes = await fetchWithTimeout(
+          `https://api.webflow.com/v2/collections/${collectionId}/items/${itemId}`,
+          { headers: { 'Authorization': `Bearer ${token}`, 'accept': 'application/json' } }, 20000, 2
+        );
+        if (vRes.ok) {
+          const vData = await vRes.json();
+          const storedBody = vData?.fieldData?.['post-body'] || '';
+          const stored = sig(storedBody);
+          const labels = { ul: 'bullet list(s)', ol: 'numbered list(s)', li: 'list item(s)', table: 'table(s)', iframe: 'video/embed(s)', img: 'image(s)' };
+          const dropped = Object.keys(sent)
+            .filter(k => stored[k] < sent[k])
+            .map(k => `${sent[k] - stored[k]} ${labels[k]}`);
+          verify = { sent, stored, dropped };
+          if (dropped.length) console.warn('⚠ VERIFY: Webflow dropped —', dropped.join(', '));
+          else console.log('✓ VERIFY: all content stored intact');
+        }
+      } catch (vErr) {
+        console.warn('Verify skipped:', vErr.message);
+      }
+    }
+
+    res.json({ ...data, verify });
   } catch (err) {
     console.error('Publish error:', err);
     if (err.name === 'AbortError') return res.status(408).json({ error: 'Publish timeout.', type: 'timeout' });
