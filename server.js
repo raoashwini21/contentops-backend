@@ -319,6 +319,20 @@ function normalizeListsForWebflow(html) {
   out = out.replace(/<ul\b[^>]*>/gi, '<ul role="list">');
   out = out.replace(/<ol\b[^>]*>/gi, '<ol role="list">');
   out = out.replace(/<li\b[^>]*>/gi, '<li role="listitem">');
+
+  // MERGE consecutive same-type lists into one list. Some authoring flows
+  // produce one single-item <ul> PER bullet; Webflow's rich text API chokes
+  // on adjacent duplicate list nodes and silently drops them (and they render
+  // with ugly gaps). Adjacent same-type lists with nothing between them ARE
+  // one list. Pattern only matches the exact canonical close+open adjacency —
+  // surgical, idempotent, cannot span content.
+  let prev;
+  do {
+    prev = out;
+    out = out.replace(/<\/ul>\s*<ul role="list">/gi, '');
+    out = out.replace(/<\/ol>\s*<ol role="list">/gi, '');
+  } while (out !== prev);
+
   return out;
 }
 
