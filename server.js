@@ -3,6 +3,7 @@ import cors from 'cors';
 import Anthropic from '@anthropic-ai/sdk';
 import dotenv from 'dotenv';
 import multer from 'multer';
+import { normalizeListsForWebflow } from './webflow-lists.js';
 
 dotenv.config();
 const app = express();
@@ -306,37 +307,6 @@ function restoreWidgets(html, widgets) {
 }
 
 // ════════════════════════════════════════════
-// WEBFLOW LIST NORMALIZER (server-side guarantee)
-// Fixes: editor-created lists nested in <div>/<p> wrappers (Webflow drops
-// these silently) and missing role attributes.
-// ════════════════════════════════════════════
-function normalizeListsForWebflow(html) {
-  let out = html;
-  // Webflow-canonical lists: ul/ol/li carry ONLY the role attribute.
-  // Foreign attrs (style/class/dir/data-* from pasted content) make Webflow's
-  // rich text API silently drop the nodes. Tag-level rewrite only — never
-  // touches content between tags, so widgets/structure are untouched.
-  out = out.replace(/<ul\b[^>]*>/gi, '<ul role="list">');
-  out = out.replace(/<ol\b[^>]*>/gi, '<ol role="list">');
-  out = out.replace(/<li\b[^>]*>/gi, '<li role="listitem">');
-
-  // MERGE consecutive same-type lists into one list. Some authoring flows
-  // produce one single-item <ul> PER bullet; Webflow's rich text API chokes
-  // on adjacent duplicate list nodes and silently drops them (and they render
-  // with ugly gaps). Adjacent same-type lists with nothing between them ARE
-  // one list. Pattern only matches the exact canonical close+open adjacency —
-  // surgical, idempotent, cannot span content.
-  let prev;
-  do {
-    prev = out;
-    out = out.replace(/<\/ul>\s*<ul role="list">/gi, '');
-    out = out.replace(/<\/ol>\s*<ol role="list">/gi, '');
-  } while (out !== prev);
-
-  return out;
-}
-
-// ════════════════════════════════════════════
 // INLINE TAG BALANCER (server-side guarantee)
 // Fixes the "everything turns bold after a point" bug: a single unclosed
 // <strong>/<em>/<b>/<i> makes the browser bold/italicize the rest of the page.
@@ -617,12 +587,13 @@ app.patch('/api/webflow', async (req, res) => {
     }
 
     const url = `https://api.webflow.com/v2/collections/${collectionId}/items/${itemId}`;
-    const response = await fetchWithTimeout(url, {
+    const patchItem = () => fetchWithTimeout(url, {
       method: 'PATCH',
       headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', 'accept': 'application/json' },
       body: JSON.stringify({ fieldData })
     }, 60000, 3);
-    const data = await response.json();
+    const response = await patchItem();
+    let data = await response.json();
     if (!response.ok) return res.status(response.status).json(data);
     blogCache.delete(collectionId);
     console.log('Published:', itemId);
@@ -633,33 +604,43 @@ app.patch('/api/webflow', async (req, res) => {
     // any loss loud instead of silent, whatever the cause (API, network, sync).
     let verify = null;
     if (fieldData['post-body']) {
-      try {
-        const count = (html, re) => (String(html).match(re) || []).length;
-        const sig = (html) => ({
-          ul: count(html, /<ul\b/gi),
-          ol: count(html, /<ol\b/gi),
-          li: count(html, /<li\b/gi),
-          table: count(html, /<table\b/gi),
-          iframe: count(html, /<iframe\b/gi),
-          img: count(html, /<img\b/gi),
-        });
-        const sent = sig(fieldData['post-body']);
-        const vRes = await fetchWithTimeout(
-          `https://api.webflow.com/v2/collections/${collectionId}/items/${itemId}`,
+      const count = (html, re) => (String(html).match(re) || []).length;
+      const sig = (html) => ({
+        ul: count(html, /<ul\b/gi),
+        ol: count(html, /<ol\b/gi),
+        li: count(html, /<li\b/gi),
+        table: count(html, /<table\b/gi),
+        iframe: count(html, /<iframe\b/gi),
+        img: count(html, /<img\b/gi),
+      });
+      const labels = { ul: 'bullet list(s)', ol: 'numbered list(s)', li: 'list item(s)', table: 'table(s)', iframe: 'video/embed(s)', img: 'image(s)' };
+      const sent = sig(fieldData['post-body']);
+      const verifyOnce = async () => {
+        const vRes = await fetchWithTimeout(url,
           { headers: { 'Authorization': `Bearer ${token}`, 'accept': 'application/json' } }, 20000, 2
         );
-        if (vRes.ok) {
-          const vData = await vRes.json();
-          const storedBody = vData?.fieldData?.['post-body'] || '';
-          const stored = sig(storedBody);
-          const labels = { ul: 'bullet list(s)', ol: 'numbered list(s)', li: 'list item(s)', table: 'table(s)', iframe: 'video/embed(s)', img: 'image(s)' };
-          const dropped = Object.keys(sent)
-            .filter(k => stored[k] < sent[k])
-            .map(k => `${sent[k] - stored[k]} ${labels[k]}`);
-          verify = { sent, stored, dropped };
-          if (dropped.length) console.warn('⚠ VERIFY: Webflow dropped —', dropped.join(', '));
-          else console.log('✓ VERIFY: all content stored intact');
+        if (!vRes.ok) return null;
+        const vData = await vRes.json();
+        const stored = sig(vData?.fieldData?.['post-body'] || '');
+        const dropped = Object.keys(sent)
+          .filter(k => stored[k] < sent[k])
+          .map(k => `${sent[k] - stored[k]} ${labels[k]}`);
+        return { sent, stored, dropped };
+      };
+      try {
+        verify = await verifyOnce();
+        // Lists missing after save → re-send once. Covers a PATCH that was cut
+        // off / half-applied; a genuine Webflow rejection stays reported below.
+        if (verify?.dropped.length && ['ul', 'ol', 'li'].some(k => verify.stored[k] < sent[k])) {
+          console.warn('⚠ VERIFY: Webflow dropped —', verify.dropped.join(', '), '— re-sending once');
+          const retry = await patchItem();
+          if (retry.ok) {
+            data = await retry.json();
+            verify = { ...(await verifyOnce()), retried: true };
+          }
         }
+        if (verify?.dropped?.length) console.warn('⚠ VERIFY: Webflow dropped —', verify.dropped.join(', '));
+        else if (verify) console.log('✓ VERIFY: all content stored intact');
       } catch (vErr) {
         console.warn('Verify skipped:', vErr.message);
       }
